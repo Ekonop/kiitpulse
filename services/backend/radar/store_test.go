@@ -314,3 +314,40 @@ func TestAppendMessageRequiresTopic(t *testing.T) {
 		t.Fatal("a message with no topic must be rejected")
 	}
 }
+
+// TestRapidAppendsKeepTheirOrder guards the ordering bug that only showed up in
+// CI: when each message was persisted from its own goroutine, two messages sent
+// milliseconds apart could land in Redis out of order and history replayed a
+// conversation that never happened. Appends from one writer must be fifo.
+func TestRapidAppendsKeepTheirOrder(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	const n = 25
+	for i := 0; i < n; i++ {
+		err := s.AppendMessage(ctx, domain.EphemeralMessage{
+			ID:         "m-order-" + string(rune('A'+i)),
+			TopicID:    "t-order",
+			SenderRoll: "241551058",
+			Content:    "message " + string(rune('A'+i)),
+		})
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	got, err := s.RecentMessages(ctx, "t-order", n)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if len(got) != n {
+		t.Fatalf("got %d messages, want %d", len(got), n)
+	}
+	for i := 0; i < n; i++ {
+		want := "message " + string(rune('A'+i))
+		if got[i].Content != want {
+			t.Fatalf("message %d = %q, want %q - history is not chronological",
+				i, got[i].Content, want)
+		}
+	}
+}

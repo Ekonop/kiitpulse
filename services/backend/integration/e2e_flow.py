@@ -100,17 +100,31 @@ for text in ["is the viva in lab 3?", "yes, get there early"]:
         "topic_id": tid, "content": text, "timestamp_unix": 1700000000}}))
     echo = json.loads(recv_frame(s))
     print("echo:", echo["send_message"]["content"])
+
+# A burst with no pause between sends. Persisting each message from its own
+# goroutine passed locally and failed in CI here: two appends racing for Redis
+# landed out of order. Sending back-to-back without sleeping is what makes that
+# race reproducible rather than incidental.
+burst = [f"burst {i}" for i in range(8)]
+for text in burst:
+    send_text(s, json.dumps({"send_message": {"id": "b-" + text,
+        "topic_id": tid, "content": text, "timestamp_unix": 1700000000}}))
+    recv_frame(s)
 s.close()
 
-time.sleep(0.6)  # let the fire-and-forget persistence finish
+time.sleep(1.0)  # let the persistence queue drain
 
 after = get(f"/topics/{tid}/messages", tok)
 print("history after:", len(after), "messages")
-for m in after:
-    print("  -", m["sender_roll"], ":", m["content"])
 
-assert len(after) == 2, f"expected 2 persisted messages, got {len(after)}"
-assert after[0]["content"] == "is the viva in lab 3?", "history not chronological"
+assert len(after) == 2 + len(burst), f"expected 10 persisted messages, got {len(after)}"
+
+# Order is the whole point: history must replay what was said in the order it
+# was said, not the order Redis happened to finish writing.
+sent = ["is the viva in lab 3?", "yes, get there early"] + burst
+got = [m["content"] for m in after]
+assert got == sent, f"history is not chronological\n  sent: {sent}\n  got:  {got}"
+print("history replays in send order")
 assert after[1]["content"] == "yes, get there early"
 assert all(m["sender_roll"] == "241551058" for m in after)
 print("PASS messages persist and replay chronologically")

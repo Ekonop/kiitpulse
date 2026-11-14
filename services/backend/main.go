@@ -69,9 +69,28 @@ func main() {
 
 	store := radar.NewStore(rdb)
 
+	// Messages are persisted by one goroutine fed from a queue, not by a
+	// goroutine per message.
+	//
+	// A goroutine per message looks harmless and is wrong: two messages sent
+	// milliseconds apart race for Redis, and the second can be written first.
+	// History then replays out of order, which is a lie about what was said.
+	// A single writer makes the order the order the hub broadcast, and keeps
+	// the socket path free of Redis latency.
+	persistQueue := make(chan domain.EphemeralMessage, 512)
+	go func() {
+		for m := range persistQueue {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := store.AppendMessage(ctx, m); err != nil {
+				log.Error("persist message", "topic", m.TopicID, "err", err)
+			}
+			cancel()
+		}
+	}()
+
 	// Persist every message the hub broadcasts so a reconnecting client can
-	// replay what it missed. Fire-and-forget with its own timeout: the sender
-	// must not wait on Redis.
+	// replay what it missed. The send is non-blocking from the socket's point
+	// of view; the single writer above owns the Redis latency.
 	hub := chat.NewHub(log,
 		chat.WithJoinHook(func(topicID string) {
 			go func() {
@@ -81,13 +100,7 @@ func main() {
 			}()
 		}),
 		chat.WithMessageStore(func(m domain.EphemeralMessage) {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				defer cancel()
-				if err := store.AppendMessage(ctx, m); err != nil {
-					log.Error("persist message", "topic", m.TopicID, "err", err)
-				}
-			}()
+			persistQueue <- m
 		}),
 	)
 
