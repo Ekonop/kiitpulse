@@ -189,6 +189,13 @@ jobs:
         working-directory: apps/mobile
         run: flutter test
 
+      # `flutter test` runs on the Dart VM, so it cannot catch anything that
+      # breaks only under dart2js/wasm. A web build is the only check that
+      # compiles the web-only code paths (conditional imports, package:web).
+      - name: Build for web
+        working-directory: apps/mobile
+        run: flutter build web --release
+
   ui-package:
     name: UI package
     runs-on: ubuntu-latest
