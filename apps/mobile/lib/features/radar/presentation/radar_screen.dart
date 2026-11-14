@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kiit_contracts/kiit_contracts.dart';
@@ -10,6 +12,40 @@ import 'radar_providers.dart';
 import 'widgets/radar_header.dart';
 import 'widgets/topic_pulse_card.dart';
 import 'widgets/zone_selector.dart';
+
+/// The "start a pulse" button, pinned to the reading column.
+///
+/// A `FloatingActionButton` alone anchors to the window edge, which on a wide
+/// browser leaves it stranded in empty space a foot away from the cards it
+/// acts on. This keeps it over the column while behaving normally on a phone.
+class _AnchoredFab extends StatelessWidget {
+  const _AnchoredFab({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    final column = math.min(width, PulseBreakpoints.contentMaxWidth);
+    // Distance from the window's right edge to the column's right edge.
+    final gutter = math.max(16.0, (width - column) / 2);
+
+    return Padding(
+      padding: EdgeInsets.only(right: gutter - 16),
+      child: FloatingActionButton.extended(
+        onPressed: onPressed,
+        backgroundColor: PulsePalette.kiitEmerald,
+        foregroundColor: const Color(0xFF00160A),
+        icon: const _SpinOnPress(),
+        label: Text(
+          'Start a pulse',
+          style: PulseType.body(13.5, weight: FontWeight.w600)
+              .copyWith(color: const Color(0xFF00160A)),
+        ),
+      ),
+    );
+  }
+}
 
 /// Radar Home - the discovery loop.
 ///
@@ -34,14 +70,19 @@ class RadarScreen extends ConsumerWidget {
     return Scaffold(
       body: SafeArea(
         bottom: false,
+        // The header and the zone chips stay full width - they are chrome, and
+        // a floating chip row looks unanchored. Only the list is a reading
+        // column, because that is the part with text in it.
         child: Column(
           children: [
-            RadarHeader(
-              selection: selection,
-              population: population.valueOrNull,
-              proximity: proximity,
+            PulseContentColumn(
+              child: RadarHeader(
+                selection: selection,
+                population: population.valueOrNull,
+                proximity: proximity,
+              ),
             ),
-            const ZoneSelector(),
+            const PulseContentColumn(child: ZoneSelector()),
             const SizedBox(height: 6),
             Expanded(
               child: AnimatedSwitcher(
@@ -54,23 +95,17 @@ class RadarScreen extends ConsumerWidget {
                       : radar.hasError
                           ? 'error'
                           : 'loading'),
-                  child: _body(ref, radar, selection),
+                  child: PulseContentColumn(
+                    child: _body(ref, radar, selection),
+                  ),
                 ),
               ),
             ),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
+      floatingActionButton: _AnchoredFab(
         onPressed: () => _openComposer(context, ref, selection),
-        backgroundColor: PulsePalette.kiitEmerald,
-        foregroundColor: const Color(0xFF00160A),
-        icon: const _SpinOnPress(),
-        label: Text(
-          'Start a pulse',
-          style: PulseType.body(13.5, weight: FontWeight.w600)
-              .copyWith(color: const Color(0xFF00160A)),
-        ),
       ),
     );
   }

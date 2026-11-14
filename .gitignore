@@ -37,3 +37,6 @@ services/backend/bin/
 *.log
 tmp/
 .DS_Store
+
+# Local verification screenshots (dev artifacts, not part of the app)
+screenshots/

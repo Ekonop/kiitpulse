@@ -4,6 +4,7 @@
 /// foil passport widgets. Nothing in here knows about features or networking.
 library kiit_ui;
 
+export 'src/pulse_breakpoints.dart';
 export 'src/pulse_motion.dart';
 export 'src/pulse_palette.dart';
 export 'src/pulse_theme.dart';

@@ -37,7 +37,7 @@ record — the value is entirely in what is happening now.
 ## Repository layout
 
 ```
-apps/mobile/            Flutter app (Linux, Android, iOS)
+apps/mobile/            Flutter app (Android, iOS, web, Linux desktop)
 packages/kiit_ui/       Design system: palette, type, motion, foil badge shader
 packages/kiit_contracts/ Wire types + velocity math + geofences
 packages/kiit_api_client/ PulseGateway interface, demo and live implementations
@@ -61,8 +61,29 @@ Swapping them is one `--dart-define`.
 ### The app, with no backend
 
 ```bash
-make demo
+make demo       # phone / desktop
+make demo-web   # browser, on http://localhost:8080
 ```
+
+### In a browser
+
+```bash
+make serve-web  # release build, served on :8080
+```
+
+The app is responsive rather than scaled. The same widgets pick a shape from
+the window width:
+
+| Width | Shape | Navigation |
+|---|---|---|
+| `< 700px` | phone | bottom bar, edge-to-edge cards |
+| `700–1100px` | tablet / small window | bottom bar, centred column |
+| `> 1100px` | desktop browser | side rail, 720px reading column |
+
+The column is capped because a radar card stretched across a 27-inch monitor is
+unreadable — the eye cannot track from a title on the left to a velocity badge on
+the right. `pulseFormFactorOf(context)` decides; a browser resize re-lays out
+without a reload.
 
 ### The app, against a real backend
 
@@ -124,6 +145,14 @@ signed with the wrong secret fails verification.
 deprecated from Android 12 and defeatable on a rooted device. The UI never
 presents it as verification.
 
+**Web presence is weaker than Android and says so.** The browser's Geolocation
+API has no mock-provider flag at all — a spoofed laptop location is
+undetectable. The web build therefore asks the browser for a real fix, refuses
+fixes coarser than 250 m (a city-level fix cannot tell one campus zone from
+another), and reports denial honestly. It does **not** fall back to a fixed
+campus coordinate; an earlier version did, which meant every web visitor was
+told they were on campus.
+
 **Slow chat clients are dropped, not waited for.** Each client has a buffered
 send channel; when it fills, that client is disconnected. One bad hostel
 connection must not stall a 500-student room.
@@ -144,6 +173,9 @@ the same coordinates and assert no two boxes overlap.
   run against a live server. Treat it as unverified until it does.
 - **No physical-device run.** The Android location plugin compiles and is
   implemented, but has not been exercised on hardware.
+- **Web location is browser-dependent.** The web build has been exercised in
+  headless Chromium with permission denied and with the demo gateway, but not
+  with a real granted geolocation fix on a phone browser.
 - **Voice audio has never been heard.** Signalling is verified end to end
   against a real LiveKit server (`integration/verify_voice_live.py`), but no
   phone has joined a stage, so whether audio actually flows is untested. Set

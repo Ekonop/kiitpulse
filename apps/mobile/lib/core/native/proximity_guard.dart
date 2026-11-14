@@ -1,5 +1,8 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
 import 'package:kiit_contracts/kiit_contracts.dart';
+
+import 'web_location.dart';
 
 /// The result of a proximity check.
 class ProximityResult {
@@ -63,6 +66,14 @@ class ProximityGuard {
   static const devFallbackLng = 85.81900;
 
   Future<ProximityResult> verifyDeviceLocation() async {
+    // The browser has no method channel. Without this branch the code below
+    // throws MissingPluginException and falls into [_fallback], which reports a
+    // fixed Campus 15 point as `verified` - an outright lie to every web
+    // visitor. Ask the browser instead.
+    if (kIsWeb) {
+      return const WebProximityGuard().verifyDeviceLocation();
+    }
+
     try {
       // Ask first. On Android this shows the system dialog; on platforms
       // without the channel it throws MissingPluginException, which the
@@ -158,6 +169,10 @@ class ProximityGuard {
 
   /// Desktop dev builds and CI have no LocationManager. Rather than showing an
   /// empty radar we verify against a fixed Campus 15 point and label it.
+  ///
+  /// This is a development convenience and must never be reached on web, where
+  /// a visitor would be told they are on a campus they may be 2000 km from.
+  /// [verifyDeviceLocation] short-circuits to [WebProximityGuard] first.
   ProximityResult _fallback({required String detail}) {
     final zone = KiitGeofences.resolve(devFallbackLat, devFallbackLng);
     return ProximityResult(

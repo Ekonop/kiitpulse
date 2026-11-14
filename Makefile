@@ -13,6 +13,7 @@ SHELL := /bin/bash
 
 FLUTTER ?= flutter
 DART    ?= dart
+PYTHON  ?= python3
 GO      ?= go
 MOBILE  := apps/mobile
 API     := packages/kiit_api_client
@@ -52,6 +53,10 @@ test-dart: ## API client + contracts tests
 test-flutter: ## Widget tests for the app
 	cd $(MOBILE) && $(FLUTTER) test
 
+.PHONY: test-ui
+test-ui: ## Tests for the design system (breakpoints, content column)
+	cd $(UI) && $(FLUTTER) test
+
 .PHONY: analyze
 analyze: ## Static analysis across all Dart code
 	cd $(CONTRACTS) && $(DART) analyze --fatal-infos
@@ -71,7 +76,7 @@ voice-check: ## Verify voice tokens against a live LiveKit SFU
 	python3 $(BACKEND)/integration/verify_voice_live.py
 
 .PHONY: test
-test: test-go test-dart test-flutter ## Every test suite
+test: test-go test-dart test-ui test-flutter ## Every test suite
 	@echo "all suites passed"
 
 .PHONY: check
@@ -83,6 +88,19 @@ check: analyze test ## The gate CI runs: analyze + all tests
 demo: ## Run the app against the in-memory campus (no services needed)
 	cd $(MOBILE) && $(FLUTTER) run \
 		--dart-define=PULSE_BACKEND=demo
+
+.PHONY: demo-web
+demo-web: ## Run the web build against the in-memory campus
+	cd $(MOBILE) && $(FLUTTER) run -d web-server --web-port 8080 \
+		--dart-define=PULSE_BACKEND=demo
+
+.PHONY: web
+web: ## Production web build into apps/mobile/build/web
+	cd $(MOBILE) && $(FLUTTER) build web --release
+
+.PHONY: serve-web
+serve-web: web ## Build the web app and serve it on :8080
+	cd $(MOBILE)/build/web && $(PYTHON) -m http.server 8080
 
 .PHONY: live
 live: ## Run the app against a local backend

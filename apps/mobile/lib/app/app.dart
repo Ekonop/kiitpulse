@@ -43,6 +43,10 @@ class KIITPulseApp extends ConsumerWidget {
 ///
 /// The radar is where students live; the passport is what they come back for.
 /// Anything else would need a tab it has not earned.
+///
+/// The shell adapts rather than stretching: a phone gets a bottom bar, a
+/// browser gets a side rail. Same destinations, same order - only the axis
+/// changes, so muscle memory survives switching devices.
 class HomeShell extends ConsumerStatefulWidget {
   const HomeShell({super.key});
 
@@ -55,17 +59,164 @@ class _HomeShellState extends ConsumerState<HomeShell> {
 
   @override
   Widget build(BuildContext context) {
+    final form = pulseFormFactorOf(context);
+
+    // One IndexedStack either way: switching destinations must not rebuild a
+    // screen or drop an open socket.
+    final pages = IndexedStack(
+      index: _index,
+      children: const [
+        RadarScreen(),
+        PassportScreen(),
+      ],
+    );
+
+    if (form.usesSideRail) {
+      return Scaffold(
+        body: Row(
+          children: [
+            _PulseNavRail(
+              index: _index,
+              onChanged: (i) => setState(() => _index = i),
+            ),
+            Expanded(child: pages),
+          ],
+        ),
+      );
+    }
+
     return Scaffold(
-      body: IndexedStack(
-        index: _index,
-        children: const [
-          RadarScreen(),
-          PassportScreen(),
-        ],
-      ),
+      body: pages,
       bottomNavigationBar: _PulseNavBar(
         index: _index,
         onChanged: (i) => setState(() => _index = i),
+      ),
+    );
+  }
+}
+
+/// Destinations, named once so the bar and the rail cannot drift apart.
+const _destinations = [
+  (icon: Icons.radar_rounded, label: 'Radar'),
+  (icon: Icons.workspace_premium_outlined, label: 'Passport'),
+];
+
+/// The wide-window navigation: a vertical rail with room for a wordmark.
+///
+/// A browser has horizontal room to spare and almost no vertical room to
+/// waste, so navigation moves to the side where a mouse and a thumb both
+/// reach it comfortably.
+class _PulseNavRail extends StatelessWidget {
+  const _PulseNavRail({required this.index, required this.onChanged});
+
+  final int index;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const ValueKey('pulse-nav-rail'),
+      width: PulseBreakpoints.railWidth,
+      decoration: const BoxDecoration(
+        color: PulsePalette.deepObsidian,
+        border: Border(right: BorderSide(color: PulsePalette.borderGrey)),
+      ),
+      child: SafeArea(
+        right: false,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(22, 22, 22, 30),
+              child: _RailWordmark(),
+            ),
+            for (var i = 0; i < _destinations.length; i++)
+              _RailItem(
+                icon: _destinations[i].icon,
+                label: _destinations[i].label,
+                selected: index == i,
+                onTap: () => onChanged(i),
+              ),
+            const Spacer(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RailWordmark extends StatelessWidget {
+  const _RailWordmark();
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: const BoxDecoration(
+            color: PulsePalette.kiitEmerald,
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(width: 9),
+        Text(
+          'KIITPULSE',
+          style: PulseType.display(15).copyWith(letterSpacing: 1.6),
+        ),
+      ],
+    );
+  }
+}
+
+class _RailItem extends StatelessWidget {
+  const _RailItem({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final tint = selected ? PulsePalette.kiitEmerald : PulsePalette.textTertiary;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+      child: Semantics(
+        button: true,
+        selected: selected,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(10),
+          splashColor: PulsePalette.kiitEmerald.withValues(alpha: 0.06),
+          highlightColor: Colors.transparent,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+            decoration: BoxDecoration(
+              color: selected
+                  ? PulsePalette.kiitEmerald.withValues(alpha: 0.10)
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              children: [
+                Icon(icon, size: 19, color: tint),
+                const SizedBox(width: 12),
+                Text(
+                  label,
+                  style: PulseType.body(13.5, weight: FontWeight.w600)
+                      .copyWith(color: tint),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -80,6 +231,7 @@ class _PulseNavBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
+      key: const ValueKey('pulse-nav-bar'),
       decoration: const BoxDecoration(
         color: PulsePalette.deepObsidian,
         border: Border(top: BorderSide(color: PulsePalette.borderGrey)),
@@ -90,18 +242,13 @@ class _PulseNavBar extends StatelessWidget {
           height: 56,
           child: Row(
             children: [
-              _NavItem(
-                icon: Icons.radar_rounded,
-                label: 'Radar',
-                selected: index == 0,
-                onTap: () => onChanged(0),
-              ),
-              _NavItem(
-                icon: Icons.workspace_premium_outlined,
-                label: 'Passport',
-                selected: index == 1,
-                onTap: () => onChanged(1),
-              ),
+              for (var i = 0; i < _destinations.length; i++)
+                _NavItem(
+                  icon: _destinations[i].icon,
+                  label: _destinations[i].label,
+                  selected: index == i,
+                  onTap: () => onChanged(i),
+                ),
             ],
           ),
         ),

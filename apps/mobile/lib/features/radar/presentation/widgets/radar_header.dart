@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kiit_contracts/kiit_contracts.dart';
@@ -167,11 +168,16 @@ class _TrustChip extends StatelessWidget {
         switch (result.status) {
           case LocationSecurityLevel.verified:
             final metres = result.accuracyMetres;
+            // The word "hardware" is a claim, and on web it is false: the
+            // browser's Geolocation API has no mock-provider flag and no
+            // hardware attestation, so saying "hardware verified" would be
+            // overstating what we know. Say what actually happened.
+            final prefix = kIsWeb ? 'BROWSER LOCATION' : 'HARDWARE VERIFIED';
             return _Chip(
               icon: Icons.verified_rounded,
               label: metres == null
-                  ? 'HARDWARE VERIFIED'
-                  : 'HARDWARE VERIFIED · ±${metres.round()} M',
+                  ? prefix
+                  : '$prefix · ±${metres.round()} M',
               tint: PulsePalette.kiitEmerald,
             );
           case LocationSecurityLevel.mockDetected:
