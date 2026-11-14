@@ -80,6 +80,65 @@ jobs:
       - name: Run end-to-end flow
         run: python3 services/backend/integration/e2e_flow.py
 
+  voice:
+    name: Voice against a live SFU
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache-dependency-path: services/backend/go.sum
+
+      # Download the published SFU binary rather than building from source:
+      # the source build pulls a large module graph and takes minutes.
+      - name: Install LiveKit server
+        run: |
+          # The official installer writes to /usr/local/bin by default.
+          curl -sSL https://get.livekit.io | sudo bash
+          livekit-server --version
+
+      - name: Start LiveKit
+        run: |
+          sudo nohup livekit-server --dev --bind 127.0.0.1 > /tmp/livekit.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:7880/ >/dev/null 2>&1 && break
+            sleep 1
+          done
+          tail -5 /tmp/livekit.log
+
+      - name: Build and start backend with voice enabled
+        working-directory: services/backend
+        env:
+          KIITPULSE_JWT_SECRET: ci-only-secret-that-is-at-least-32-bytes-long
+          KIITPULSE_REDIS_ADDR: 127.0.0.1:6379
+          KIITPULSE_ADDR: ":8102"
+          KIITPULSE_LIVEKIT_URL: ws://127.0.0.1:7880
+          KIITPULSE_LIVEKIT_KEY: devkey
+          KIITPULSE_LIVEKIT_SECRET: secret
+        run: |
+          go build -o /tmp/kp-voice .
+          /tmp/kp-voice &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8102/healthz && break
+            sleep 1
+          done
+
+      # Mints real tokens and completes a real WebSocket handshake with the SFU.
+      # The unit tests cannot catch a token the SFU itself would refuse.
+      - name: Verify voice tokens against the SFU
+        run: python3 services/backend/integration/verify_voice_live.py
+
   dart:
     name: Dart packages
     runs-on: ubuntu-latest

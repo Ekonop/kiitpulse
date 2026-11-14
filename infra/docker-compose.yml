@@ -53,20 +53,36 @@ services:
       KIITPULSE_JWT_SECRET: "${KIITPULSE_JWT_SECRET:-development-only-secret-change-me-32b}"
       KIITPULSE_DATABASE_URL: "postgres://pulse:pulse_dev_only@postgres:5432/kiitpulse?sslmode=disable"
       KIITPULSE_ORIGIN: "*"
+      # Matches the livekit service's --dev credentials above.
+      KIITPULSE_LIVEKIT_URL: "ws://localhost:7880"
+      KIITPULSE_LIVEKIT_KEY: "devkey"
+      KIITPULSE_LIVEKIT_SECRET: "secret"
     depends_on:
       redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      livekit:
+        condition: service_started
     restart: unless-stopped
 
-  # livekit:
-  #   image: livekit/livekit-server:latest
-  #   command: ["--dev"]
-  #   ports:
-  #     - "7880:7880"
-  #     - "7881:7881"
-  #     - "7882:7882/udp"
+  # LiveKit SFU for voice stages. `--dev` mode uses the well-known devkey/secret
+  # pair, which is what the backend env below is wired to. That is fine on a
+  # laptop and unforgivable in production: replace both before deploying, or
+  # anyone can join any room.
+  livekit:
+    image: livekit/livekit-server:latest
+    command: ["--dev", "--bind", "0.0.0.0"]
+    ports:
+      - "7880:7880"      # signalling (ws)
+      - "7881:7881"      # rtc/tcp fallback
+      - "7882:7882/udp"  # rtc/udp - the media path that actually matters
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7880/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
 
 volumes:
   redis-data:

@@ -66,6 +66,10 @@ e2e: ## End-to-end flow against a running backend (needs Redis)
 	@echo "expects a server on KIITPULSE_E2E_URL (default http://127.0.0.1:8101)"
 	python3 $(BACKEND)/integration/e2e_flow.py
 
+.PHONY: voice-check
+voice-check: ## Verify voice tokens against a live LiveKit SFU
+	python3 $(BACKEND)/integration/verify_voice_live.py
+
 .PHONY: test
 test: test-go test-dart test-flutter ## Every test suite
 	@echo "all suites passed"

@@ -100,7 +100,8 @@ make test     # tests only
 | Android APK | builds with the location plugin in Kotlin and LiveKit's native WebRTC |
 | **Postgres schema** | **not executed** — no Postgres available in the dev env |
 | **On-device app run** | **not done** — needs a physical Android phone |
-| **LiveKit audio** | **tokens real and verified; audio never heard** — no SFU to connect to |
+| LiveKit voice | verified against a real SFU built from source: listener token reaches a `101` handshake, a tampered token gets `401`, and the grant in the JWT says `canPublish=false` |
+| **Voice audio** | **never heard** — no phone has joined a stage; only signalling is proven |
 
 The last three are honest gaps, not omissions. See "Known gaps" below.
 
@@ -143,14 +144,24 @@ the same coordinates and assert no two boxes overlap.
   run against a live server. Treat it as unverified until it does.
 - **No physical-device run.** The Android location plugin compiles and is
   implemented, but has not been exercised on hardware.
-- **LiveKit audio has never been heard.** Token minting is real and verified
-  (signed JWTs, publish rights absent from listener tokens, room-scoped), but
-  no SFU was reachable from the dev environment, so end-to-end audio is
-  untested. Set `KIITPULSE_LIVEKIT_URL`, `_KEY` and `_SECRET` to enable it; with
-  them unset the endpoint says voice is off rather than handing out a token that
-  cannot connect.
+- **Voice audio has never been heard.** Signalling is verified end to end
+  against a real LiveKit server (`integration/verify_voice_live.py`), but no
+  phone has joined a stage, so whether audio actually flows is untested. Set
+  `KIITPULSE_LIVEKIT_URL`, `_KEY` and `_SECRET` to enable voice; with them unset
+  the endpoint says voice is off rather than handing out a token that cannot
+  connect.
 - **Lottie/Iconscout assets are not integrated.** Motion is hand-built with
   Flutter animations; the seams exist for Lottie later.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE). Use it, fork it, ship it.
+
+One caveat the license cannot speak for: MIT covers this source code, not the
+KIIT name, logo, or the campus geofence data. Running a real deployment for
+KIIT students is a decision for KIIT, not a permission this repository grants.
 
 ---
 
