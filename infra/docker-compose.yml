@@ -1,0 +1,73 @@
+# Local development stack for KIITPulse.
+#
+#   docker compose -f infra/docker-compose.yml up
+#
+# Brings up Postgres, Redis and the backend. LiveKit is optional and commented
+# out: voice stages degrade to "not configured" without it, which is the honest
+# behaviour, and a half-working media server is worse than an obvious absence.
+
+services:
+  redis:
+    image: redis:7-alpine
+    # appendonly: the radar is a ranking, and losing 60s of it on a restart is
+    # acceptable, but losing the whole zone map is not.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: kiitpulse
+      POSTGRES_USER: pulse
+      # Development only. The deploy path sets this from a secret manager.
+      POSTGRES_PASSWORD: pulse_dev_only
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulse -d kiitpulse"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ../services/backend
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      KIITPULSE_ADDR: ":8080"
+      KIITPULSE_REDIS_ADDR: "redis:6379"
+      # Substituted at run time. Never commit a real secret; this one is
+      # obviously fake so an accidental deploy is at least visible.
+      KIITPULSE_JWT_SECRET: "${KIITPULSE_JWT_SECRET:-development-only-secret-change-me-32b}"
+      KIITPULSE_DATABASE_URL: "postgres://pulse:pulse_dev_only@postgres:5432/kiitpulse?sslmode=disable"
+      KIITPULSE_ORIGIN: "*"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # livekit:
+  #   image: livekit/livekit-server:latest
+  #   command: ["--dev"]
+  #   ports:
+  #     - "7880:7880"
+  #     - "7881:7881"
+  #     - "7882:7882/udp"
+
+volumes:
+  redis-data:
+  pg-data:

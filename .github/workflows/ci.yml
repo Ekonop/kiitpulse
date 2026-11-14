@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One in-flight run per ref: a push that supersedes an older commit should not
+# queue behind it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Go backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache-dependency-path: services/backend/go.sum
+
+      - name: Build
+        working-directory: services/backend
+        run: go build ./...
+
+      - name: Vet
+        working-directory: services/backend
+        run: go vet ./...
+
+      # The race detector matters here: the chat hub is concurrent by design and
+      # a send-on-closed-channel panic took a real bug to find.
+      - name: Test (race)
+        working-directory: services/backend
+        run: go test -race ./...
+
+  dart:
+    name: Dart packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install (contracts)
+        working-directory: packages/kiit_contracts
+        run: dart pub get
+
+      - name: Test (contracts)
+        working-directory: packages/kiit_contracts
+        run: dart test
+
+      - name: Install (api client)
+        working-directory: packages/kiit_api_client
+        run: dart pub get
+
+      - name: Test (api client)
+        working-directory: packages/kiit_api_client
+        run: dart test
+
+  flutter:
+    name: Flutter app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.7'
+          channel: stable
+          cache: true
+
+      - name: Pub get
+        working-directory: apps/mobile
+        run: flutter pub get
+
+      - name: Analyze
+        working-directory: apps/mobile
+        run: flutter analyze --fatal-infos
+
+      - name: Test
+        working-directory: apps/mobile
+        run: flutter test
+
+  ui-package:
+    name: UI package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.7'
+          channel: stable
+          cache: true
+
+      - name: Pub get
+        working-directory: packages/kiit_ui
+        run: flutter pub get
+
+      - name: Analyze
+        working-directory: packages/kiit_ui
+        run: flutter analyze --fatal-infos

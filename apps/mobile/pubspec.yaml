@@ -1,0 +1,27 @@
+name: kiitpulse
+description: "KIITPulse: hyper-local trending topics, ephemeral chat and live voice rooms for KIIT."
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.0
+  flutter: ">=3.35.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.5.1
+  kiit_ui:
+    path: ../../packages/kiit_ui
+  kiit_contracts:
+    path: ../../packages/kiit_contracts
+  kiit_api_client:
+    path: ../../packages/kiit_api_client
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

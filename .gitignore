@@ -1,0 +1,39 @@
+# Flutter / Dart
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+.idea/
+.vscode/
+analysis_results.json
+
+# Flutter generated platform files that should not be committed
+apps/mobile/android/.gradle/
+apps/mobile/android/local.properties
+apps/mobile/ios/Pods/
+apps/mobile/ios/.symlinks/
+apps/mobile/linux/flutter/ephemeral/
+apps/mobile/macos/Flutter/ephemeral/
+apps/mobile/windows/flutter/ephemeral/
+**/ephemeral/
+
+# Go
+services/backend/server
+services/backend/bin/
+*.test
+*.out
+
+# Secrets — never commit a real key.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!infra/**/*.example
+
+# Local data
+*.log
+tmp/
+.DS_Store

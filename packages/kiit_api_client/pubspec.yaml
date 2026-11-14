@@ -1,0 +1,18 @@
+name: kiit_api_client
+description: Transport for KIITPulse - campus gateway, demo fakes and the socket client.
+publish_to: "none"
+version: 1.0.0
+
+environment:
+  sdk: ^3.9.0
+
+dependencies:
+  kiit_contracts:
+    path: ../kiit_contracts
+  web_socket_channel: ^3.0.0
+  http: ^1.2.2
+
+dev_dependencies:
+  test: ^1.25.0
+  async: ^2.11.0
+  lints: ^5.0.0
