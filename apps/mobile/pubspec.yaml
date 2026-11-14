@@ -17,6 +17,7 @@ dependencies:
     path: ../../packages/kiit_contracts
   kiit_api_client:
     path: ../../packages/kiit_api_client
+  livekit_client: ^2.13.2
 
 dev_dependencies:
   flutter_test:

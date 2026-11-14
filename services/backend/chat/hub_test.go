@@ -116,7 +116,7 @@ func readFrame(t *testing.T, conn *websocket.Conn) map[string]json.RawMessage {
 }
 
 func TestBroadcastReachesEveryMemberOfTheRoom(t *testing.T) {
-	hub := NewHub(quietLogger(), nil)
+	hub := NewHub(quietLogger())
 	srv := newRoomServer(t, hub)
 
 	a := dial(t, srv, "t1", "241551058")
@@ -158,7 +158,7 @@ func TestBroadcastReachesEveryMemberOfTheRoom(t *testing.T) {
 // client that puts someone else's roll in the frame must not be able to post
 // as them.
 func TestSenderCannotSpoofIdentity(t *testing.T) {
-	hub := NewHub(quietLogger(), nil)
+	hub := NewHub(quietLogger())
 	srv := newRoomServer(t, hub)
 
 	sender := dial(t, srv, "t1", "241551058")
@@ -203,7 +203,7 @@ func TestSenderCannotSpoofIdentity(t *testing.T) {
 // back so it can match the ack exactly, while the server still assigns the real
 // message id.
 func TestClientIdIsEchoedForReconciliation(t *testing.T) {
-	hub := NewHub(quietLogger(), nil)
+	hub := NewHub(quietLogger())
 	srv := newRoomServer(t, hub)
 
 	conn := dial(t, srv, "t1", "241551058")
@@ -239,7 +239,7 @@ func TestClientIdIsEchoedForReconciliation(t *testing.T) {
 }
 
 func TestOversizedMessageIsDropped(t *testing.T) {
-	hub := NewHub(quietLogger(), nil)
+	hub := NewHub(quietLogger())
 	srv := newRoomServer(t, hub)
 
 	conn := dial(t, srv, "t1", "241551058")
@@ -271,7 +271,7 @@ func TestOversizedMessageIsDropped(t *testing.T) {
 }
 
 func TestEmptyRoomIsForgotten(t *testing.T) {
-	hub := NewHub(quietLogger(), nil)
+	hub := NewHub(quietLogger())
 	srv := newRoomServer(t, hub)
 
 	conn := dial(t, srv, "t1", "241551058")
@@ -294,7 +294,7 @@ func TestEmptyRoomIsForgotten(t *testing.T) {
 // corruption. Room membership is read from HTTP handlers and written from read
 // loops, so an unlocked map would be a data race in production.
 func TestConcurrentJoinsAndBroadcasts(t *testing.T) {
-	hub := NewHub(quietLogger(), nil)
+	hub := NewHub(quietLogger())
 	srv := newRoomServer(t, hub)
 
 	var wg sync.WaitGroup
@@ -326,4 +326,65 @@ func TestConcurrentJoinsAndBroadcasts(t *testing.T) {
 
 	wg.Wait()
 	hub.CloseAll()
+}
+
+// TestStoreCallbackReceivesEveryBroadcastMessage verifies the persistence hook.
+// Without it, a client that reconnects finds a hole in the conversation because
+// the hub broadcast but never wrote anything down.
+func TestStoreCallbackReceivesEveryBroadcastMessage(t *testing.T) {
+	var mu sync.Mutex
+	var stored []domain.EphemeralMessage
+
+	hub := NewHub(quietLogger(),
+		WithMessageStore(func(m domain.EphemeralMessage) {
+			mu.Lock()
+			stored = append(stored, m)
+			mu.Unlock()
+		}),
+	)
+	srv := newRoomServer(t, hub)
+
+	conn := dial(t, srv, "t1", "241551058")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	deadline := time.Now().Add(3 * time.Second)
+	for hub.RoomSize("t1") < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	drainPresence(t, conn, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	frame := `{"send_message":{"id":"local-1","topic_id":"t1","content":"remember me"}}`
+	if err := conn.Write(ctx, websocket.MessageText, []byte(frame)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	readUntil(t, conn, "send_message")
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(stored)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(stored) != 1 {
+		t.Fatalf("stored %d messages, want 1", len(stored))
+	}
+	if stored[0].Content != "remember me" {
+		t.Errorf("stored content = %q", stored[0].Content)
+	}
+	// The persisted copy must carry the server's id and the sender identity.
+	if stored[0].ID == "" || stored[0].ID == "local-1" {
+		t.Errorf("persisted message has no server id: %q", stored[0].ID)
+	}
+	if stored[0].SenderRoll != "241551058" {
+		t.Errorf("persisted sender = %q, want the verified roll", stored[0].SenderRoll)
+	}
 }

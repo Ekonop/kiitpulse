@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,8 @@ import (
 	"github.com/kiitpulse/backend/chat"
 	"github.com/kiitpulse/backend/domain"
 	"github.com/kiitpulse/backend/radar"
+	"github.com/kiitpulse/backend/stage"
+	"github.com/kiitpulse/backend/voice"
 )
 
 // CtxStudent is the Gin context key holding the authenticated student.
@@ -23,13 +26,17 @@ const CtxStudent = "pulse.student"
 
 // Deps are everything the router needs.
 type Deps struct {
-	Log    *slog.Logger
-	Auth   *auth.Service
-	Radar  *radar.Store
-	Hub    *chat.Hub
-	Redis  *redis.Client
+	Log   *slog.Logger
+	Auth  *auth.Service
+	Radar *radar.Store
+	Hub   *chat.Hub
+	Redis *redis.Client
 	// AllowOrigin is the single CORS origin allowed, or "*" for dev.
 	AllowOrigin string
+	// Voice is the LiveKit configuration. Zero value means voice is off.
+	Voice voice.Config
+	// Stage tracks speaker grants per topic.
+	Stage *stage.Registry
 }
 
 // NewRouter builds the HTTP surface.
@@ -155,20 +162,20 @@ func NewRouter(d Deps) *gin.Engine {
 		}
 
 		topic := domain.TopicPulse{
-			ID:           newID("t"),
-			Title:        title,
-			Description:  desc,
-			Zone:         int32(zone),
-			MessageCount: 1,
+			ID:            newID("t"),
+			Title:         title,
+			Description:   desc,
+			Zone:          int32(zone),
+			MessageCount:  1,
 			CreatedAtUnix: time.Now().Unix(),
 		}
-		if err := d.Radar.CreateTopic(c.Request.Context(), topic); err != nil {
+		created, err := d.Radar.CreateTopic(c.Request.Context(), topic)
+		if err != nil {
 			d.Log.Error("radar: create topic", "err", err)
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "could not create topic"})
 			return
 		}
-		topic.VelocityScore = radar.RawScore(1, 0, 0)
-		c.JSON(http.StatusCreated, topic)
+		c.JSON(http.StatusCreated, created)
 	})
 
 	// ---- voice ---------------------------------------------------------
@@ -181,16 +188,80 @@ func NewRouter(d Deps) *gin.Engine {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "topic_id is required"})
 			return
 		}
-		// A listener request never grants publish rights. Promotion is a
-		// separate, server-authorised action.
 		student := c.MustGet(CtxStudent).(domain.Student)
-		c.JSON(http.StatusOK, gin.H{
-			"token":   "stub-" + student.RollNumber + "-" + body.TopicID,
-			"ws_url":  "",
-			"room":    "kiit-huddle-" + body.TopicID,
-			"publish": false,
-			"note":    "LiveKit is not configured on this deployment",
+
+		// Publish rights are decided here, never by the client. `as_speaker` is
+		// only a hint: it is ignored unless the server has already granted this
+		// student a speaker slot for this topic.
+		canPublish := d.Stage != nil && d.Stage.IsSpeaker(body.TopicID, student.RollNumber)
+		if body.AsSpeaker && !canPublish {
+			// Asking nicely does not grant it. Answer honestly rather than
+			// silently degrading: the app shows "waiting for the stage".
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "you are not speaking on this stage yet",
+				"code":  "SPEAKER_NOT_GRANTED",
+			})
+			return
+		}
+
+		token, room, err := voice.Mint(d.Voice, voice.TokenRequest{
+			TopicID:    body.TopicID,
+			Roll:       student.RollNumber,
+			CanPublish: canPublish,
 		})
+		if errors.Is(err, voice.ErrNotConfigured) {
+			c.JSON(http.StatusOK, gin.H{
+				"token":   "",
+				"ws_url":  "",
+				"room":    voice.RoomName(body.TopicID),
+				"publish": false,
+				"note":    "voice is not configured on this deployment",
+			})
+			return
+		}
+		if err != nil {
+			d.Log.Error("voice: mint token", "err", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not mint a voice token"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"token":   token,
+			"ws_url":  d.Voice.URL,
+			"room":    room,
+			"publish": canPublish,
+		})
+	})
+
+	// Granting a speaker slot. In a full build this is moderator-only; the
+	// gate is here so the boundary exists even before roles ship.
+	authed.POST("/voice/stage/:topicID/speakers", func(c *gin.Context) {
+		topicID := c.Param("topicID")
+		var body struct {
+			Roll string `json:"roll"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil || body.Roll == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "roll is required"})
+			return
+		}
+		student := c.MustGet(CtxStudent).(domain.Student)
+
+		// Only the requesting student can be promoted for now: promoting others
+		// needs the moderator role, which does not exist yet. Refusing is better
+		// than shipping a hole where any client can make anyone a speaker.
+		if body.Roll != student.RollNumber {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "promoting another student requires the moderator role",
+				"code":  "MODERATOR_REQUIRED",
+			})
+			return
+		}
+		if d.Stage == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "stage unavailable"})
+			return
+		}
+		d.Stage.GrantSpeaker(topicID, body.Roll)
+		c.JSON(http.StatusOK, gin.H{"topic_id": topicID, "roll": body.Roll, "speaker": true})
 	})
 
 	authed.POST("/voice/hand-raise", func(c *gin.Context) {
@@ -216,16 +287,23 @@ func NewRouter(d Deps) *gin.Engine {
 
 	// ---- chat history --------------------------------------------------
 	authed.GET("/topics/:topicID/messages", func(c *gin.Context) {
-		// History lives in Redis lists per room, capped and expiring with the
-		// topic so an ephemeral room really is ephemeral.
+		// History is a capped Redis list that expires with the topic, so an
+		// ephemeral room really is ephemeral. Decoded here rather than passed
+		// through raw so a corrupt entry is skipped instead of corrupting the
+		// whole response.
 		topicID := c.Param("topicID")
-		key := "kiit:messages:" + topicID
-		raw, err := d.Redis.LRange(c.Request.Context(), key, -50, -1).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
+		limit := 50
+		if q := c.Query("limit"); q != "" {
+			if n, err := strconv.Atoi(q); err == nil && n > 0 && n <= 200 {
+				limit = n
+			}
+		}
+		messages, err := d.Radar.RecentMessages(c.Request.Context(), topicID, limit)
+		if err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "history unavailable"})
 			return
 		}
-		c.JSON(http.StatusOK, raw)
+		c.JSON(http.StatusOK, messages)
 	})
 
 	// ---- passport ------------------------------------------------------

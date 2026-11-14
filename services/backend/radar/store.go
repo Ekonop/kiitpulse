@@ -2,6 +2,7 @@ package radar
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -56,9 +57,14 @@ func presenceKey(zone campus.Zone) string {
 }
 
 // CreateTopic inserts a topic and gives it a seed score.
-func (s *Store) CreateTopic(ctx context.Context, t domain.TopicPulse) error {
+//
+// It returns the stored record rather than having the caller guess at the
+// server-assigned timestamps and score: the handler responds with this, so a
+// client never sees `last_activity_unix: 0` for a topic that does have an
+// activity stamp.
+func (s *Store) CreateTopic(ctx context.Context, t domain.TopicPulse) (domain.TopicPulse, error) {
 	if t.Zone < int32(campus.ZoneCampus15) || t.Zone > int32(campus.ZoneKIMS) {
-		return fmt.Errorf("radar: topic %q has invalid zone %d", t.ID, t.Zone)
+		return domain.TopicPulse{}, fmt.Errorf("radar: topic %q has invalid zone %d", t.ID, t.Zone)
 	}
 	now := time.Now().Unix()
 	if t.CreatedAtUnix == 0 {
@@ -67,6 +73,8 @@ func (s *Store) CreateTopic(ctx context.Context, t domain.TopicPulse) error {
 	t.LastActivityUnix = now
 
 	zone := campus.Zone(t.Zone)
+	seed := RawScore(int(t.MessageCount), 0, 0)
+
 	pipe := s.rdb.Pipeline()
 	pipe.HSet(ctx, topicKey(t.ID), map[string]any{
 		"id":              t.ID,
@@ -79,14 +87,16 @@ func (s *Store) CreateTopic(ctx context.Context, t domain.TopicPulse) error {
 		"last_activity":   t.LastActivityUnix,
 	})
 	pipe.ZAdd(ctx, radarKey(zone), redis.Z{
-		Score:  RawScore(int(t.MessageCount), 0, 0),
+		Score:  seed,
 		Member: t.ID,
 	})
 	pipe.Expire(ctx, topicKey(t.ID), TopicTTL*time.Second)
 	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("radar: create topic: %w", err)
+		return domain.TopicPulse{}, fmt.Errorf("radar: create topic: %w", err)
 	}
-	return nil
+
+	t.VelocityScore = seed
+	return t, nil
 }
 
 // RecordEvent adds weight to a topic's score and refreshes its TTL.
@@ -300,4 +310,61 @@ func mustInt64(s string) int64 {
 		return 0
 	}
 	return n
+}
+
+// ---- message history ----------------------------------------------------
+
+// messageHistoryCap bounds a room's stored history.
+//
+// Rooms are ephemeral, so 200 messages is the whole conversation. A hard cap
+// means a viral topic cannot grow one Redis list without bound.
+const messageHistoryCap = 200
+
+func messagesKey(topicID string) string { return "kiit:messages:" + topicID }
+
+// AppendMessage records a message and trims the list to the cap.
+//
+// The list and its expiry are written in one pipeline: a message whose TTL is
+// never set would outlive the topic it belongs to, which breaks the promise
+// that a room really is ephemeral.
+func (s *Store) AppendMessage(ctx context.Context, m domain.EphemeralMessage) error {
+	if m.TopicID == "" {
+		return errors.New("radar: message has no topic")
+	}
+	body, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("radar: marshal message: %w", err)
+	}
+
+	key := messagesKey(m.TopicID)
+	pipe := s.rdb.Pipeline()
+	pipe.RPush(ctx, key, body)
+	pipe.LTrim(ctx, key, -messageHistoryCap, -1)
+	pipe.Expire(ctx, key, TopicTTL*time.Second)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("radar: append message: %w", err)
+	}
+	return nil
+}
+
+// RecentMessages returns a topic's last `limit` messages, oldest first.
+func (s *Store) RecentMessages(ctx context.Context, topicID string, limit int) ([]domain.EphemeralMessage, error) {
+	if limit <= 0 || limit > messageHistoryCap {
+		limit = 50
+	}
+	raw, err := s.rdb.LRange(ctx, messagesKey(topicID), int64(-limit), -1).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, err
+	}
+
+	out := make([]domain.EphemeralMessage, 0, len(raw))
+	for _, item := range raw {
+		var m domain.EphemeralMessage
+		if err := json.Unmarshal([]byte(item), &m); err != nil {
+			// A corrupt entry must not hide the rest of the history.
+			continue
+		}
+		out = append(out, m)
+	}
+	return out, nil
 }

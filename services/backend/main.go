@@ -27,7 +27,10 @@ import (
 	"github.com/kiitpulse/backend/api"
 	"github.com/kiitpulse/backend/auth"
 	"github.com/kiitpulse/backend/chat"
+	"github.com/kiitpulse/backend/domain"
 	"github.com/kiitpulse/backend/radar"
+	"github.com/kiitpulse/backend/stage"
+	"github.com/kiitpulse/backend/voice"
 )
 
 func main() {
@@ -65,7 +68,39 @@ func main() {
 	cancel()
 
 	store := radar.NewStore(rdb)
-	hub := chat.NewHub(log, nil)
+
+	// Persist every message the hub broadcasts so a reconnecting client can
+	// replay what it missed. Fire-and-forget with its own timeout: the sender
+	// must not wait on Redis.
+	hub := chat.NewHub(log,
+		chat.WithJoinHook(func(topicID string) {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				_ = rdb.Expire(ctx, "kiit:messages:"+topicID, radar.TopicTTL*time.Second).Err()
+			}()
+		}),
+		chat.WithMessageStore(func(m domain.EphemeralMessage) {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				if err := store.AppendMessage(ctx, m); err != nil {
+					log.Error("persist message", "topic", m.TopicID, "err", err)
+				}
+			}()
+		}),
+	)
+
+	voiceCfg := voice.Config{
+		URL:       env("KIITPULSE_LIVEKIT_URL", ""),
+		APIKey:    env("KIITPULSE_LIVEKIT_KEY", ""),
+		APISecret: env("KIITPULSE_LIVEKIT_SECRET", ""),
+	}
+	if voiceCfg.Configured() {
+		log.Info("voice enabled", "url", voiceCfg.URL)
+	} else {
+		log.Warn("voice disabled: set KIITPULSE_LIVEKIT_URL/_KEY/_SECRET to enable stages")
+	}
 
 	router := api.NewRouter(api.Deps{
 		Log:         log,
@@ -74,6 +109,8 @@ func main() {
 		Hub:         hub,
 		Redis:       rdb,
 		AllowOrigin: env("KIITPULSE_ORIGIN", "*"),
+		Voice:       voiceCfg,
+		Stage:       stage.New(),
 	})
 
 	srv := &http.Server{

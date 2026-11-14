@@ -15,6 +15,8 @@ import (
 	"github.com/kiitpulse/backend/chat"
 	"github.com/kiitpulse/backend/domain"
 	"github.com/kiitpulse/backend/radar"
+	"github.com/kiitpulse/backend/stage"
+	"github.com/kiitpulse/backend/voice"
 )
 
 // newTestRouter builds a router with no Redis. Handlers that need Redis will
@@ -32,7 +34,7 @@ func newTestRouter(t *testing.T) (http.Handler, *auth.Service) {
 		Log:         log,
 		Auth:        svc,
 		Radar:       radar.NewStore(rdb),
-		Hub:         chat.NewHub(log, nil),
+		Hub:         chat.NewHub(log),
 		Redis:       rdb,
 		AllowOrigin: "*",
 	}), svc
@@ -196,11 +198,13 @@ func TestUnknownZoneRejected(t *testing.T) {
 	}
 }
 
-func TestVoiceTokenNeverGrantsPublish(t *testing.T) {
-	r, svc := newTestRouter(t)
+// TestVoiceDegradesHonestlyWhenUnconfigured: with no LiveKit server, the
+// endpoint says so instead of handing out a token that cannot connect.
+func TestVoiceDegradesHonestlyWhenUnconfigured(t *testing.T) {
+	r, svc := newTestRouter(t) // newTestRouter has no Voice config
 	token, _, _ := svc.Issue(domainStudent("241551058"))
 
-	body := strings.NewReader(`{"topic_id":"t1","as_speaker":true}`)
+	body := strings.NewReader(`{"topic_id":"t1"}`)
 	req := httptest.NewRequest(http.MethodPost, "/voice/token", body)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -212,10 +216,14 @@ func TestVoiceTokenNeverGrantsPublish(t *testing.T) {
 	}
 	var resp map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
-	// Even asking as_speaker:true must not produce a publish grant from this
-	// endpoint - promotion is a separate server-authorised action.
 	if resp["publish"] != false {
 		t.Errorf("publish = %v, want false", resp["publish"])
+	}
+	if resp["token"] != "" {
+		t.Errorf("token = %v, want empty when voice is not configured", resp["token"])
+	}
+	if note, _ := resp["note"].(string); note == "" {
+		t.Error("no note explaining that voice is off")
 	}
 }
 
@@ -224,5 +232,128 @@ func domainStudent(roll string) domain.Student {
 		Email:      roll + "@kiit.ac.in",
 		RollNumber: roll,
 		BranchTag:  auth.BranchTagFor(roll),
+	}
+}
+
+// ---- voice ---------------------------------------------------------------
+
+func newVoiceRouter(t *testing.T) (http.Handler, *auth.Service) {
+	t.Helper()
+	svc, _ := auth.NewService("0123456789abcdef0123456789abcdef", time.Hour)
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	log := slog.New(slog.NewTextHandler(io_discard{}, nil))
+
+	return NewRouter(Deps{
+		Log:   log,
+		Auth:  svc,
+		Radar: radar.NewStore(rdb),
+		Hub:   chat.NewHub(log),
+		Redis: rdb,
+		Voice: voice.Config{
+			URL:       "wss://voice.example.test",
+			APIKey:    "key",
+			APISecret: "secret-that-is-long-enough-to-sign-tokens",
+		},
+		Stage: stage.New(),
+	}), svc
+}
+
+// TestClientCannotGrantItselfSpeaker is the role-machine boundary test.
+func TestClientCannotGrantItselfSpeaker(t *testing.T) {
+	r, svc := newVoiceRouter(t)
+	token, _, _ := svc.Issue(domainStudent("241551058"))
+
+	// Ask for a speaker token without a grant.
+	body := strings.NewReader(`{"topic_id":"t1","as_speaker":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/voice/token", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; a client granted itself publish rights",
+			w.Code)
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["code"] != "SPEAKER_NOT_GRANTED" {
+		t.Errorf("code = %v", resp["code"])
+	}
+}
+
+func TestListenerTokenIsIssuedWithoutPublish(t *testing.T) {
+	r, svc := newVoiceRouter(t)
+	token, _, _ := svc.Issue(domainStudent("241551058"))
+
+	body := strings.NewReader(`{"topic_id":"t1"}`)
+	req := httptest.NewRequest(http.MethodPost, "/voice/token", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["publish"] != false {
+		t.Errorf("publish = %v, want false", resp["publish"])
+	}
+	if resp["ws_url"] != "wss://voice.example.test" {
+		t.Errorf("ws_url = %v", resp["ws_url"])
+	}
+	if tok, _ := resp["token"].(string); tok == "" {
+		t.Error("no token issued for a configured voice server")
+	}
+}
+
+func TestSpeakerRouteRefusesPromotingOthers(t *testing.T) {
+	r, svc := newVoiceRouter(t)
+	token, _, _ := svc.Issue(domainStudent("241551058"))
+
+	body := strings.NewReader(`{"roll":"999999999"}`)
+	req := httptest.NewRequest(http.MethodPost, "/voice/stage/t1/speakers", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d; any client could promote anyone to speaker", w.Code)
+	}
+}
+
+func TestSelfPromotionThenSpeakerTokenSucceeds(t *testing.T) {
+	// The full happy path: the student takes a speaker slot, then the token
+	// endpoint grants publish.
+	r, svc := newVoiceRouter(t)
+	token, _, _ := svc.Issue(domainStudent("241551058"))
+
+	promo := strings.NewReader(`{"roll":"241551058"}`)
+	req := httptest.NewRequest(http.MethodPost, "/voice/stage/t1/speakers", promo)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("promotion status = %d", w.Code)
+	}
+
+	body := strings.NewReader(`{"topic_id":"t1","as_speaker":true}`)
+	req = httptest.NewRequest(http.MethodPost, "/voice/token", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("token status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["publish"] != true {
+		t.Errorf("publish = %v, want true after a speaker grant", resp["publish"])
 	}
 }

@@ -43,7 +43,7 @@ func TestZoneTopicsRankedByVelocity(t *testing.T) {
 		topic("warm", zone, "canteen menu"),
 		topic("mid", zone, "tiffin share"),
 	} {
-		if err := s.CreateTopic(ctx, tp); err != nil {
+		if _, err := s.CreateTopic(ctx, tp); err != nil {
 			t.Fatalf("create %s: %v", tp.ID, err)
 		}
 	}
@@ -81,7 +81,7 @@ func TestDecayAllPurgesColdTopics(t *testing.T) {
 	ctx := context.Background()
 	zone := campus.ZoneCampus15
 
-	_ = s.CreateTopic(ctx, topic("busy", zone, "busy room"))
+	_, _ = s.CreateTopic(ctx, topic("busy", zone, "busy room"))
 	// A hot topic that stops getting engagement.
 	_ = s.RecordEvent(ctx, zone, "busy", EventMessage)
 	_ = s.RecordEvent(ctx, zone, "busy", EventMessage)
@@ -128,7 +128,7 @@ func TestRecordEventRefreshesTTL(t *testing.T) {
 	ctx := context.Background()
 	zone := campus.ZoneCampus15
 
-	_ = s.CreateTopic(ctx, topic("t1", zone, "one"))
+	_, _ = s.CreateTopic(ctx, topic("t1", zone, "one"))
 	key := "kiit:topic:t1"
 
 	mr.FastForward(3 * time.Hour)
@@ -145,10 +145,47 @@ func TestRecordEventRefreshesTTL(t *testing.T) {
 	}
 }
 
+// TestCreateTopicReturnsStoredRecord pins the fix for a topic being returned
+// with last_activity_unix == 0 even though a real activity stamp was stored.
+func TestCreateTopicReturnsStoredRecord(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	zone := campus.ZoneCampus15
+
+	created, err := s.CreateTopic(ctx, topic("fresh", zone, "just now"))
+	if err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	if created.LastActivityUnix == 0 {
+		t.Error("returned last_activity_unix is 0; the handler would show a " +
+			"topic that has never been active")
+	}
+	if created.CreatedAtUnix == 0 {
+		t.Error("returned created_at_unix is 0")
+	}
+	if created.VelocityScore <= 0 {
+		t.Errorf("returned seed score = %v, want > 0", created.VelocityScore)
+	}
+
+	// What was returned must match what was persisted.
+	stored, err := s.Topic(ctx, "fresh")
+	if err != nil {
+		t.Fatalf("Topic: %v", err)
+	}
+	if created.LastActivityUnix != stored.LastActivityUnix {
+		t.Errorf("returned last_activity %d != stored %d",
+			created.LastActivityUnix, stored.LastActivityUnix)
+	}
+	if created.VelocityScore != stored.VelocityScore {
+		t.Errorf("returned score %v != stored %v",
+			created.VelocityScore, stored.VelocityScore)
+	}
+}
+
 func TestCreateTopicRejectsUnknownZone(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
-	err := s.CreateTopic(ctx, topic("bad", campus.ZoneOffCampus, "x"))
+	_, err := s.CreateTopic(ctx, topic("bad", campus.ZoneOffCampus, "x"))
 	if err == nil {
 		t.Fatal("creating a topic in offCampus must fail")
 	}
@@ -195,5 +232,85 @@ func TestMergeZones(t *testing.T) {
 	// Descending score.
 	if merged[0].ID != "a2" || merged[1].ID != "a1" || merged[2].ID != "b1" {
 		t.Errorf("merge order wrong: %v", merged)
+	}
+}
+
+func TestAppendAndReadMessages(t *testing.T) {
+	s, mr := newTestStore(t)
+	ctx := context.Background()
+
+	_ = s.AppendMessage(ctx, domain.EphemeralMessage{
+		ID: "m1", TopicID: "t1", SenderRoll: "241551058", Content: "first",
+	})
+	_ = s.AppendMessage(ctx, domain.EphemeralMessage{
+		ID: "m2", TopicID: "t1", SenderRoll: "241551204", Content: "second",
+	})
+
+	got, err := s.RecentMessages(ctx, "t1", 50)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d messages, want 2", len(got))
+	}
+	// Oldest first: the view reverses, so the source order must be chronological.
+	if got[0].Content != "first" || got[1].Content != "second" {
+		t.Errorf("order = %q, %q; want chronological", got[0].Content, got[1].Content)
+	}
+
+	// History must expire with the topic, or a room is not ephemeral.
+	ttl := mr.TTL("kiit:messages:t1")
+	if ttl <= 0 {
+		t.Error("message history has no TTL; it would outlive the topic")
+	}
+}
+
+func TestMessageHistoryIsCapped(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	// Push more than the cap.
+	for i := 0; i < messageHistoryCap+25; i++ {
+		_ = s.AppendMessage(ctx, domain.EphemeralMessage{
+			ID: "m", TopicID: "hot", Content: "spam",
+		})
+	}
+
+	got, err := s.RecentMessages(ctx, "hot", messageHistoryCap)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if len(got) > messageHistoryCap {
+		t.Errorf("history grew to %d, cap is %d", len(got), messageHistoryCap)
+	}
+}
+
+func TestRecentMessagesSkipsCorruptEntries(t *testing.T) {
+	s, mr := newTestStore(t)
+	ctx := context.Background()
+
+	_ = s.AppendMessage(ctx, domain.EphemeralMessage{
+		ID: "m1", TopicID: "t1", Content: "good one",
+	})
+	mr.RPush("kiit:messages:t1", "not json at all")
+	_ = s.AppendMessage(ctx, domain.EphemeralMessage{
+		ID: "m2", TopicID: "t1", Content: "good two",
+	})
+
+	got, err := s.RecentMessages(ctx, "t1", 50)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d messages, want the 2 valid ones", len(got))
+	}
+}
+
+func TestAppendMessageRequiresTopic(t *testing.T) {
+	s, _ := newTestStore(t)
+	if err := s.AppendMessage(context.Background(), domain.EphemeralMessage{
+		ID: "m1", Content: "orphan",
+	}); err == nil {
+		t.Fatal("a message with no topic must be rejected")
 	}
 }

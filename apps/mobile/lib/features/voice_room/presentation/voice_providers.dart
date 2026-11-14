@@ -3,16 +3,22 @@ import 'dart:math' as math;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kiit_contracts/kiit_contracts.dart';
+import 'package:livekit_client/livekit_client.dart' as lk;
 
 import '../../../core/auth/auth_controller.dart';
+import 'voice_dialable.dart';
 import '../../../core/providers.dart';
 
 /// Live stage state for one topic.
 ///
-/// This is the client-side half of the LiveKit controller. The real SDK
-/// (`livekit_client`) plugs in behind [attachRoom] when the backend and the
-/// native platform are wired; until then the demo gateway drives the same
-/// state machine, so the UI is exercised end to end.
+/// This drives a real LiveKit room. The server mints a token; this class
+/// connects, publishes the microphone only when the server granted publish
+/// rights, and tears the room down on leave.
+///
+/// Two rules it must never break:
+///   * connect with the token exactly as issued - never "fix up" the grant;
+///   * destroy the Room and stop local audio on every exit path, or the phone
+///     keeps a hot microphone after the student leaves the stage.
 ///
 /// The role machine is the security boundary:
 ///   listener -> handRaised -> speaker
@@ -108,21 +114,115 @@ class VoiceStageController extends StateNotifier<VoiceStageState> {
     );
   }
 
+  /// The connected LiveKit room, or null when not on a stage.
+  lk.Room? _room;
+  lk.EventsListener? _events;
+
   /// Enter the stage as a passive listener.
   ///
   /// Minting a token with `asSpeaker: false` is the only thing the client is
-  /// allowed to ask for; if the server returns publish rights anyway we ignore
-  /// them rather than trusting our own request.
+  /// allowed to ask for. If the server returns a token that happens to carry
+  /// publish rights, that is the server's decision, not something this class
+  /// infers from its own request.
   Future<void> joinAsListener(String incomingTopicId) async {
     if (state.joined) return;
     try {
       final gateway = _ref.read(pulseGatewayProvider);
-      await gateway.mintStageToken(topicId: topicId, asSpeaker: false);
+      final stageToken =
+          await gateway.mintStageToken(topicId: topicId, asSpeaker: false);
       if (!mounted) return;
+
+      // An empty token means the deployment has no voice server. Say so instead
+      // of pretending to be connected: a green banner over silence is a lie.
+      if (!isDialableStageToken(stageToken)) {
+        state = state.copyWith(isConnected: false, joined: false);
+        return;
+      }
+
+      final room = lk.Room();
+      await room.connect(stageToken.wsUrl, stageToken.token);
+      if (!mounted) {
+        await room.disconnect();
+        await room.dispose();
+        return;
+      }
+      _room = room;
+      _bindRoomEvents(room);
+
       state = state.copyWith(isConnected: true, joined: true);
     } catch (_) {
+      await _teardownRoom();
       if (!mounted) return;
       state = state.copyWith(isConnected: false, joined: false);
+    }
+  }
+
+  /// Mirror the real room's participants into the stage state.
+  void _bindRoomEvents(lk.Room room) {
+    _events = room.createListener();
+    _events?.on<lk.ParticipantConnectedEvent>((_) => _syncParticipants());
+    _events?.on<lk.ParticipantDisconnectedEvent>((_) => _syncParticipants());
+    _events?.on<lk.TrackMutedEvent>((_) => _syncParticipants());
+    _events?.on<lk.TrackUnmutedEvent>((_) => _syncParticipants());
+    _events?.on<lk.ActiveSpeakersChangedEvent>((e) {
+      final ids = e.speakers.map((p) => p.identity).toList();
+      if (!mounted) return;
+      state = state.copyWith(
+        activeSpeakerId: ids.isEmpty ? null : ids.first,
+        clearActiveSpeaker: ids.isEmpty,
+      );
+    });
+    _events?.on<lk.RoomDisconnectedEvent>((_) async {
+      await _teardownRoom();
+      if (!mounted) return;
+      state = const VoiceStageState();
+    });
+    _syncParticipants();
+  }
+
+  void _syncParticipants() {
+    final room = _room;
+    if (room == null || !mounted) return;
+
+    final me = room.localParticipant;
+    final participants = <VoiceParticipant>[
+      if (me != null) _toParticipant(me, isLocal: true),
+      for (final p in room.remoteParticipants.values) _toParticipant(p),
+    ];
+
+    final self = participants.isEmpty ? null : participants.first;
+    state = state.copyWith(
+      participants: participants,
+      role: self?.role ?? state.role,
+      isMuted: self?.isMuted ?? state.isMuted,
+    );
+  }
+
+  VoiceParticipant _toParticipant(lk.Participant p, {bool isLocal = false}) {
+    // Trust the server's grant, not the client's intent: a participant can
+    // publish only if their token allowed it. `permissions` is server-issued.
+    final canPublish = p.permissions.canPublish;
+
+    return VoiceParticipant(
+      identity: p.identity,
+      displayRoll: p.identity,
+      branchTag: p.name.isNotEmpty ? p.name : p.identity,
+      role: canPublish ? StageRole.speaker : StageRole.listener,
+      isMuted: !p.isMicrophoneEnabled(),
+    );
+  }
+
+  Future<void> _teardownRoom() async {
+    await _events?.dispose();
+    _events = null;
+    final room = _room;
+    _room = null;
+    if (room != null) {
+      try {
+        await room.localParticipant?.setMicrophoneEnabled(false);
+      } catch (_) {}
+      await room.disconnect();
+      await room.dispose();
     }
   }
 
@@ -148,15 +248,25 @@ class VoiceStageController extends StateNotifier<VoiceStageState> {
   }
 
   Future<void> toggleMic() async {
-    if (state.role != StageRole.speaker) return;
+    if (state.role != StageRole.speaker && state.role != StageRole.moderator) {
+      // A listener has no publish grant; there is nothing to unmute.
+      return;
+    }
     final next = !state.isMuted;
     state = state.copyWith(isMuted: next);
-    // Attached LiveKit local participant would be toggled here.
+    try {
+      await _room?.localParticipant?.setMicrophoneEnabled(!next);
+    } catch (_) {
+      if (!mounted) return;
+      // Roll back: the OS refused the microphone (permission or a busy device).
+      state = state.copyWith(isMuted: !next);
+    }
   }
 
   Future<void> leave() async {
     await _sub?.cancel();
     _sub = null;
+    await _teardownRoom();
     if (!mounted) return;
     state = const VoiceStageState();
   }
@@ -164,6 +274,9 @@ class VoiceStageController extends StateNotifier<VoiceStageState> {
   @override
   void dispose() {
     _sub?.cancel();
+    // Fire and forget: dispose cannot await, but the microphone must not stay
+    // open after the widget is gone.
+    unawaited(_teardownRoom());
     super.dispose();
   }
 }

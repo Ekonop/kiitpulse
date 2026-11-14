@@ -94,12 +94,13 @@ make test     # tests only
 |---|---|
 | Go backend | 64 tests, `-race` clean |
 | Dart packages | 34 tests (18 client + 16 contracts) |
-| Flutter app | 12 widget tests, `flutter analyze` clean |
+| Flutter app | 17 tests, `flutter analyze` clean |
+| End-to-end flow | `integration/e2e_flow.py` against a real server + real Redis: sign in → create topic → radar ranks it → WebSocket message → persisted → replayed over REST |
 | Backend HTTP surface | booted and curl'd: sign-in, 401, 403, 503, 400 paths |
-| Android APK | builds; location plugin implemented in Kotlin |
+| Android APK | builds with the location plugin in Kotlin and LiveKit's native WebRTC |
 | **Postgres schema** | **not executed** — no Postgres available in the dev env |
 | **On-device app run** | **not done** — needs a physical Android phone |
-| **LiveKit voice** | **not wired** — `/voice/token` returns a stub |
+| **LiveKit audio** | **tokens real and verified; audio never heard** — no SFU to connect to |
 
 The last three are honest gaps, not omissions. See "Known gaps" below.
 
@@ -111,6 +112,12 @@ The last three are honest gaps, not omissions. See "Known gaps" below.
 listener → handRaised. Only the server may grant `speaker` or `moderator`.
 `/voice/token` refuses to return a publish grant even when asked for one, and a
 test asserts it.
+
+**Voice grants are cryptographic, not advisory.** `voice/token.go` mints real
+LiveKit JWTs. A listener token carries no publish grant *in the signed token*,
+so the SFU refuses to let it publish — the restriction does not depend on the
+client behaving. Tests verify each token's signature and assert that a token
+signed with the wrong secret fails verification.
 
 **Mock-GPS detection is a speed bump, not proof.** `Location.isMock` is
 deprecated from Android 12 and defeatable on a rooted device. The UI never
@@ -136,8 +143,12 @@ the same coordinates and assert no two boxes overlap.
   run against a live server. Treat it as unverified until it does.
 - **No physical-device run.** The Android location plugin compiles and is
   implemented, but has not been exercised on hardware.
-- **LiveKit is not wired.** Voice stages render and the stage model works, but
-  `/voice/token` returns a stub and no audio flows.
+- **LiveKit audio has never been heard.** Token minting is real and verified
+  (signed JWTs, publish rights absent from listener tokens, room-scoped), but
+  no SFU was reachable from the dev environment, so end-to-end audio is
+  untested. Set `KIITPULSE_LIVEKIT_URL`, `_KEY` and `_SECRET` to enable it; with
+  them unset the endpoint says voice is off rather than handing out a token that
+  cannot connect.
 - **Lottie/Iconscout assets are not integrated.** Motion is hand-built with
   Flutter animations; the seams exist for Lottie later.
 

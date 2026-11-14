@@ -37,6 +37,49 @@ jobs:
         working-directory: services/backend
         run: go test -race ./...
 
+  e2e:
+    name: End-to-end flow
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache-dependency-path: services/backend/go.sum
+
+      - name: Build server
+        working-directory: services/backend
+        run: go build -o /tmp/kp .
+
+      # The unit tests use miniredis; this exercises a real Redis and a real
+      # WebSocket handshake, which is where the persistence and framing bugs
+      # actually live.
+      - name: Start server
+        working-directory: services/backend
+        env:
+          KIITPULSE_JWT_SECRET: ci-only-secret-that-is-at-least-32-bytes-long
+          KIITPULSE_REDIS_ADDR: 127.0.0.1:6379
+          KIITPULSE_ADDR: ":8101"
+        run: |
+          /tmp/kp &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8101/healthz && break
+            sleep 1
+          done
+
+      - name: Run end-to-end flow
+        run: python3 services/backend/integration/e2e_flow.py
+
   dart:
     name: Dart packages
     runs-on: ubuntu-latest

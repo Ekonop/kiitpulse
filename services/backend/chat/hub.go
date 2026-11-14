@@ -63,18 +63,42 @@ type Hub struct {
 
 	// joined is called when a client enters a room (presence/velocity hook).
 	joined func(topicID string)
+
+	// persisted is called for every message that is broadcast, so history
+	// survives a client reconnecting. Optional: a hub with no store still
+	// works, it just cannot replay.
+	persisted func(domain.EphemeralMessage)
+}
+
+// HubOption configures a Hub.
+type HubOption func(*Hub)
+
+// WithJoinHook registers the presence/velocity callback.
+func WithJoinHook(fn func(topicID string)) HubOption {
+	return func(h *Hub) { h.joined = fn }
+}
+
+// WithMessageStore registers a callback invoked for each broadcast message.
+//
+// It is called from the sender's read loop, so implementations must not block:
+// a slow disk must not delay the person typing.
+func WithMessageStore(fn func(domain.EphemeralMessage)) HubOption {
+	return func(h *Hub) { h.persisted = fn }
 }
 
 // NewHub builds an empty hub.
-func NewHub(log *slog.Logger, onJoin func(topicID string)) *Hub {
+func NewHub(log *slog.Logger, opts ...HubOption) *Hub {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Hub{
-		rooms:  make(map[string]map[*Client]struct{}),
-		log:    log,
-		joined: onJoin,
+	h := &Hub{
+		rooms: make(map[string]map[*Client]struct{}),
+		log:   log,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // HandleSocket takes over an upgraded connection for a topic room.
@@ -288,6 +312,11 @@ func (c *Client) handleMessage(raw json.RawMessage) {
 		incoming.TimestampUnix = time.Now().Unix()
 	}
 
+	// Persist before broadcasting: a client that reconnects must be able to
+	// replay a message it already saw live, not find a hole in its history.
+	if c.hub.persisted != nil {
+		c.hub.persisted(incoming)
+	}
 	c.hub.Broadcast(c.topicID, incoming, "send_message")
 }
 
