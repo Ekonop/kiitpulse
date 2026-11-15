@@ -116,7 +116,7 @@ make test     # tests only
 | Go backend | 64 tests, `-race` clean |
 | Dart packages | 34 tests (18 client + 16 contracts) |
 | Flutter app | 17 tests, `flutter analyze` clean |
-| End-to-end flow | `integration/e2e_flow.py` against a real server + real Redis: sign in → create topic → radar ranks it → WebSocket message → persisted → replayed over REST |
+| End-to-end flow | `integration/e2e_flow.py` against a real server + real Redis: sign in → create topic → radar ranks it → WebSocket message → persisted → replayed over REST → radar velocity rises → reaction accepted and scored → stage roster lists the joiner → hand-raise persists → passport awards badges |
 | Backend HTTP surface | booted and curl'd: sign-in, 401, 403, 503, 400 paths |
 | Android APK | builds with the location plugin in Kotlin and LiveKit's native WebRTC |
 | **Postgres schema** | **not executed** — no Postgres available in the dev env |
@@ -184,6 +184,15 @@ the same coordinates and assert no two boxes overlap.
   connect.
 - **Lottie/Iconscout assets are not integrated.** Motion is hand-built with
   Flutter animations; the seams exist for Lottie later.
+- **Passport badges report activity, not attendance.** The blueprint's badges
+  are event credentials ("KIIT Fest · Core Team"). This server has no
+  attendance feed and cannot verify them, so instead of printing a credential
+  nobody checked, badges are earned from activity the server observed itself:
+  messages sent, topics opened, voice stages joined, zones visited. Each badge
+  carries the evidence in `event_name` and the UI must present it as evidence,
+  never as attendance.
+- **Reactions are scored but not aggregated per message.** A tap fans out to the
+  room and counts toward velocity; there is no per-message tally persisted.
 
 ---
 

@@ -68,6 +68,8 @@ type Hub struct {
 	// survives a client reconnecting. Optional: a hub with no store still
 	// works, it just cannot replay.
 	persisted func(domain.EphemeralMessage)
+	// onReaction is called after a reaction is broadcast.
+	onReaction func(topicID, roll string)
 }
 
 // HubOption configures a Hub.
@@ -84,6 +86,12 @@ func WithJoinHook(fn func(topicID string)) HubOption {
 // a slow disk must not delay the person typing.
 func WithMessageStore(fn func(domain.EphemeralMessage)) HubOption {
 	return func(h *Hub) { h.persisted = fn }
+}
+
+// WithReactionHook runs after a reaction is broadcast, so the radar can score
+// it. Separate from the message hook because a reaction has no body to persist.
+func WithReactionHook(fn func(topicID, roll string)) HubOption {
+	return func(h *Hub) { h.onReaction = fn }
 }
 
 // NewHub builds an empty hub.
@@ -181,7 +189,15 @@ func (h *Hub) Members(topicID string) []string {
 // The payload is marshalled once, not per client. Slow clients are dropped
 // rather than blocking the room.
 func (h *Hub) Broadcast(topicID string, payload any, kind string) {
-	body, err := json.Marshal(map[string]any{kind: payload})
+	h.BroadcastRaw(topicID, map[string]any{kind: payload})
+}
+
+// BroadcastRaw sends an already-shaped frame to everyone in a room.
+//
+// Reactions and presence carry their own envelope shape, so wrapping them again
+// would nest the frame one level too deep for the client to recognise.
+func (h *Hub) BroadcastRaw(topicID string, frame map[string]any) {
+	body, err := json.Marshal(frame)
 	if err != nil {
 		h.log.Error("chat: marshal broadcast", "topic", topicID, "err", err)
 		return
@@ -285,8 +301,43 @@ func (c *Client) readLoop() {
 		if raw, ok := frame["send_message"]; ok {
 			c.handleMessage(raw)
 		}
-		// Reaction and hand-raise frames are routed by their own services;
-		// the hub only fans text out.
+		if raw, ok := frame["reaction"]; ok {
+			c.handleReaction(raw)
+		}
+	}
+}
+
+// handleReaction fans a reaction out to the room and lets the radar score it.
+//
+// The client was already sending these frames; the hub silently dropped them,
+// so a tap on the fire button did nothing visible and never counted toward
+// velocity.
+func (c *Client) handleReaction(raw json.RawMessage) {
+	var incoming struct {
+		MessageID string `json:"message_id"`
+		Emoji     string `json:"emoji"`
+	}
+	if err := json.Unmarshal(raw, &incoming); err != nil {
+		return
+	}
+	if incoming.Emoji == "" || len(incoming.Emoji) > 16 {
+		return
+	}
+
+	// Identity comes from the verified session, never the wire.
+	frame := map[string]any{
+		"reaction": map[string]any{
+			"topic_id":       c.topicID,
+			"message_id":     incoming.MessageID,
+			"emoji":          incoming.Emoji,
+			"sender_roll":    c.student.RollNumber,
+			"timestamp_unix": time.Now().Unix(),
+		},
+	}
+
+	c.hub.BroadcastRaw(c.topicID, frame)
+	if c.hub.onReaction != nil {
+		c.hub.onReaction(c.topicID, c.student.RollNumber)
 	}
 }
 

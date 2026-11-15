@@ -225,6 +225,36 @@ class DemoGateway implements PulseGateway {
   }
 
   @override
+  Future<void> joinStage(String topicId) async {
+    if (_stageState[topicId] == null) _seedStage(topicId);
+    final members = _stageState[topicId]!;
+    if (members.any((p) => p.displayRoll == _selfRoll)) return;
+
+    _stageState[topicId] = [
+      ...members,
+      VoiceParticipant(
+        identity: _selfRoll,
+        displayRoll: _selfRoll,
+        branchTag: _selfBranch,
+        role: StageRole.listener,
+        isMuted: true,
+        joinedAt: DateTime.now(),
+      ),
+    ];
+    _stageCtrls[topicId]?.add(_stageState[topicId]!);
+    _bumpVelocity(topicId, VelocityEventKind.voiceJoin);
+  }
+
+  @override
+  Future<void> leaveStage(String topicId) async {
+    final members = _stageState[topicId];
+    if (members == null) return;
+    _stageState[topicId] =
+        members.where((p) => p.displayRoll != _selfRoll).toList();
+    _stageCtrls[topicId]?.add(_stageState[topicId]!);
+  }
+
+  @override
   Future<void> setHandRaised({
     required String topicId,
     required bool raised,
@@ -276,48 +306,49 @@ class DemoGateway implements PulseGateway {
   Future<List<FoilBadge>> fetchBadges(String studentRoll) async {
     await Future<void>.delayed(const Duration(milliseconds: 120));
     final now = DateTime.now();
-    return [
-      FoilBadge(
-        id: 'b-kiitfest',
+
+    // The demo gateway used to hand back "KIIT Fest 2026 · Core Team" and
+    // similar. It has no attendance feed, so those were claims about the
+    // student that nothing had checked. These badges instead describe what the
+    // demo session actually did, and say so in the evidence line - the same
+    // rule the real server follows.
+    final messages = _messages.values
+        .expand((list) => list)
+        .where((m) => m.senderRoll == studentRoll)
+        .length;
+    // TopicPulse carries no creator field, so "topics opened" cannot be
+    // attributed to this student in the demo. Report only what is attributable:
+    // messages they sent and the zones those messages reached.
+    final zonesTouched = _messages.entries
+        .where((e) => e.value.any((m) => m.senderRoll == studentRoll))
+        .map((e) => e.key)
+        .toSet()
+        .length;
+
+    final badges = <FoilBadge>[];
+    if (messages >= 1) {
+      badges.add(FoilBadge(
+        id: 'b-first-word',
         studentRoll: studentRoll,
-        type: 'KIIT_FEST',
-        label: 'KIIT Fest',
-        eventName: 'KIIT Fest 2026 · Core Team',
-        issuedAt: now.subtract(const Duration(days: 61)),
-        signature: 'demo-sig-kiitfest',
+        type: 'FIRST_WORD',
+        label: 'First Word',
+        eventName: '$messages messages sent on the campus radar',
+        issuedAt: now,
         accentArgb: 0xFF00C853,
-      ),
-      FoilBadge(
-        id: 'b-kritarth',
+      ));
+    }
+    if (zonesTouched >= 2) {
+      badges.add(FoilBadge(
+        id: 'b-pathfinder',
         studentRoll: studentRoll,
-        type: 'KRITARTH',
-        label: 'Kritarth',
-        eventName: 'Kritarth 7.0 · Volunteer',
-        issuedAt: now.subtract(const Duration(days: 128)),
-        signature: 'demo-sig-kritarth',
-        accentArgb: 0xFF00B0FF,
-      ),
-      FoilBadge(
-        id: 'b-cybervault',
-        studentRoll: studentRoll,
-        type: 'CYBERVAULT',
-        label: 'CyberVault',
-        eventName: 'CyberVault CTF · Top 20',
-        issuedAt: now.subtract(const Duration(days: 22)),
-        signature: 'demo-sig-cybervault',
+        type: 'PATHFINDER',
+        label: 'Pathfinder',
+        eventName: 'active in $zonesTouched campus zones',
+        issuedAt: now,
         accentArgb: 0xFFFF4D4D,
-      ),
-      FoilBadge(
-        id: 'b-hacknight',
-        studentRoll: studentRoll,
-        type: 'HACKNIGHT',
-        label: 'K1000 HackNight',
-        eventName: 'K1000 HackNight · Speaker',
-        issuedAt: now.subtract(const Duration(days: 9)),
-        signature: 'demo-sig-hacknight',
-        accentArgb: 0xFFFFB300,
-      ),
-    ];
+      ));
+    }
+    return badges;
   }
 
   // ---------------------------------------------------------------------

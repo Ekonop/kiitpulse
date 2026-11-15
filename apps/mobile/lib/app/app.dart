@@ -57,6 +57,15 @@ class HomeShell extends ConsumerStatefulWidget {
 class _HomeShellState extends ConsumerState<HomeShell> {
   int _index = 0;
 
+  void _select(int i) {
+    setState(() => _index = i);
+    // Badges are earned from activity elsewhere in the app, and the passport
+    // stays mounted inside the IndexedStack. Nudge it to re-read when shown.
+    if (i == 1) {
+      ref.read(passportRefreshProvider.notifier).state++;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final form = pulseFormFactorOf(context);
@@ -77,7 +86,7 @@ class _HomeShellState extends ConsumerState<HomeShell> {
           children: [
             _PulseNavRail(
               index: _index,
-              onChanged: (i) => setState(() => _index = i),
+              onChanged: _select,
             ),
             Expanded(child: pages),
           ],
@@ -89,7 +98,7 @@ class _HomeShellState extends ConsumerState<HomeShell> {
       body: pages,
       bottomNavigationBar: _PulseNavBar(
         index: _index,
-        onChanged: (i) => setState(() => _index = i),
+        onChanged: _select,
       ),
     );
   }

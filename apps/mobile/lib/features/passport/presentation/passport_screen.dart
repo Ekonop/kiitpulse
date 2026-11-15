@@ -9,14 +9,28 @@ import '../../../core/providers.dart';
 final badgesProvider = FutureProvider.autoDispose<List<FoilBadge>>((ref) async {
   final session = ref.watch(currentSessionProvider);
   if (session == null) return const [];
+
+  // The shell keeps every screen alive in an IndexedStack, so autoDispose never
+  // fires while the app is open. Without this, a student earns a badge and the
+  // passport keeps showing the list it fetched the first time the tab was
+  // built. Watching the visible destination makes the list refetch on entry.
+  ref.watch(passportRefreshProvider);
+
   return ref.watch(pulseGatewayProvider).fetchBadges(session.rollNumber);
 });
 
+/// Bumped whenever the passport becomes visible, so [badgesProvider] re-reads.
+final passportRefreshProvider = StateProvider<int>((ref) => 0);
+
 /// Profile and KIIT foil passport.
 ///
-/// The badges are the retention loop: each one is a hardware-signed proof of
-/// attendance, rendered with the gyro-reactive foil shader. The grid keeps the
-/// aspect ratio fixed at 160x220 so the shader never has to letterbox.
+/// The badges are the retention loop. Each one is issued by the server from
+/// activity it observed (messages sent, stages joined, zones visited) and states
+/// that evidence in its own caption. They are deliberately *not* presented as
+/// event attendance: this deployment has no attendance feed and cannot verify
+/// who turned up to KIIT Fest. Rendered with the gyro-reactive foil shader; the
+/// grid keeps the aspect ratio fixed at 160x220 so the shader never has to
+/// letterbox.
 class PassportScreen extends ConsumerWidget {
   const PassportScreen({super.key});
 
@@ -197,8 +211,9 @@ class _PassportHeader extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    'Each badge is signed on-device and tied to your roll '
-                    'number. Tilt the phone to catch the foil.',
+                    'Each badge is awarded from activity this campus server '
+                    'observed, and says what earned it. Tilt the phone to '
+                    'catch the foil.',
                     style: PulseType.body(11)
                         .copyWith(color: PulsePalette.textTertiary),
                   ),

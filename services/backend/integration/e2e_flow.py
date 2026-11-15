@@ -17,6 +17,7 @@ import os
 import socket
 import sys
 import time
+import urllib.error
 import urllib.request
 
 # Override with KIITPULSE_E2E_URL when the server is not on localhost.
@@ -34,6 +35,25 @@ def signin(email):
 def get(path, token):
     req = urllib.request.Request(BASE + path, headers={"Authorization": "Bearer " + token})
     return json.load(urllib.request.urlopen(req))
+
+def post(path, payload, token=None):
+    """POST JSON and return (status, decoded body), including error bodies.
+
+    Error responses carry the machine-readable code the client checks, so they
+    must be readable rather than raised.
+    """
+    req = urllib.request.Request(
+        BASE + path,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST")
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
 
 def ws_connect(topic, token, port=WS_PORT):
     s = socket.create_connection((WS_HOST, port), timeout=5)
@@ -125,6 +145,47 @@ sent = ["is the viva in lab 3?", "yes, get there early"] + burst
 got = [m["content"] for m in after]
 assert got == sent, f"history is not chronological\n  sent: {sent}\n  got:  {got}"
 print("history replays in send order")
+
+# ---- the features that used to be stubs ---------------------------------
+
+# The radar must actually move. This was the app's central claim and it was
+# false: RecordEvent had no callers, so the score never left its seed.
+row = [t for t in get(f"/radar/zones/campus15", tok) if t["id"] == tid][0]
+assert row["message_count"] > 1, (
+    f"message_count is {row['message_count']}; messages are not being scored"
+)
+assert row["velocity_score"] > 1, (
+    f"velocity_score is {row['velocity_score']}; the radar never moved"
+)
+print(f"PASS radar moved: score {row['velocity_score']}, {row['message_count']} messages")
+
+# Reactions are accepted, validated, and counted.
+st, body = post(f"/topics/{tid}/react", {"kind": "fire"}, tok)
+assert st == 200, (st, body)
+st, body = post(f"/topics/{tid}/react", {"kind": "not-a-kind"}, tok)
+assert st == 400, f"an unknown reaction kind was accepted: {st}"
+print("PASS reactions validate and record")
+
+# The stage roster must list real people, not an empty array.
+st, joined = post(f"/voice/stage/{tid}/join", {}, tok)
+assert st == 200, (st, joined)
+assert any(m["roll"] == "241551058" for m in joined["members"]), joined
+st, raised = post("/voice/hand-raise", {"topic_id": tid, "raised": True}, tok)
+assert st == 200 and raised.get("role") == "handRaised", (st, raised)
+print("PASS stage roster and hand-raise are real")
+
+roster = get(f"/voice/stage/{tid}", tok)
+assert roster["count"] >= 1 and roster["members"], roster
+print(f"PASS stage roster has {roster['count']} member(s)")
+
+# The passport must award badges from observed activity, not return [].
+badges = get("/passport/241551058", tok)
+assert isinstance(badges, list) and badges, f"passport is empty: {badges!r}"
+types = {b["badge_type"] for b in badges}
+assert "FIRST_WORD" in types, types
+for b in badges:
+    assert b.get("event_name"), f"badge {b['id']} gives no evidence for itself"
+print(f"PASS passport awards {len(badges)} badge(s): {sorted(types)}")
 assert after[1]["content"] == "yes, get there early"
 assert all(m["sender_roll"] == "241551058" for m in after)
 print("PASS messages persist and replay chronologically")

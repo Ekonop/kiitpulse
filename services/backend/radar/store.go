@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -151,10 +152,35 @@ func (s *Store) Topic(ctx context.Context, topicID string) (domain.TopicPulse, e
 		CreatedAtUnix:    mustInt64(fields["created_at_unix"]),
 		LastActivityUnix: mustInt64(fields["last_activity"]),
 	}
-	if score, err := s.rdb.ZScore(ctx, radarKey(campus.Zone(t.Zone)), topicID).Result(); err == nil {
-		t.VelocityScore = score
+	// The sorted set holds the weighted event *accumulator*, not the displayed
+	// velocity. Dividing by elapsed time here is what makes the ranking match
+	// the blueprint: without it a topic with one voice join scores 3.5 forever
+	// and outranks a topic that is genuinely busy right now.
+	if raw, err := s.rdb.ZScore(ctx, radarKey(campus.Zone(t.Zone)), topicID).Result(); err == nil {
+		t.VelocityScore = applyElapsed(raw, t.CreatedAtUnix)
 	}
 	return t, nil
+}
+
+// applyElapsed converts an accumulated event weight into the displayed
+// velocity by dividing by the topic's age in minutes^gamma.
+//
+// Elapsed is measured from the topic's last activity, not its creation: a topic
+// that was quiet for an hour and then got ten messages in a minute is hot now,
+// and ageing it from creation would hide that.
+func applyElapsed(raw float64, lastActivityUnix int64) float64 {
+	if lastActivityUnix == 0 {
+		return raw
+	}
+	elapsed := float64(time.Now().Unix() - lastActivityUnix)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	minutes := elapsed / 60.0
+	if minutes < 1 {
+		minutes = 1
+	}
+	return raw / math.Pow(minutes, Gamma)
 }
 
 // ZoneTopics returns the top N topics for a zone, highest score first.
@@ -366,5 +392,81 @@ func (s *Store) RecentMessages(ctx context.Context, topicID string, limit int) (
 		}
 		out = append(out, m)
 	}
+	return out, nil
+}
+
+// ---- per-student activity counters ---------------------------------------
+
+func activityKey(roll string) string { return "kiit:student:" + roll }
+
+// ActivityTTL bounds how long a student's counters live.
+//
+// Same horizon as a topic: the passport reflects this campus cycle, not a
+// permanent record of the student.
+const ActivityTTL = 7 * 24 * time.Hour
+
+// BumpActivity increments one counter for a student.
+//
+// first_seen is set only if absent, so a student's start date does not drift
+// forward on every message.
+func (s *Store) BumpActivity(ctx context.Context, roll, field string) error {
+	if roll == "" || field == "" {
+		return fmt.Errorf("radar: activity needs a roll and a field")
+	}
+	key := activityKey(roll)
+	pipe := s.rdb.Pipeline()
+	pipe.HIncrBy(ctx, key, field, 1)
+	pipe.HSetNX(ctx, key, "first_seen", time.Now().Unix())
+	pipe.Expire(ctx, key, ActivityTTL)
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("radar: bump activity %s: %w", field, err)
+	}
+	return nil
+}
+
+// AddActivityZone records that a student was active in a zone.
+//
+// A set, so revisiting a zone does not inflate the count.
+func (s *Store) AddActivityZone(ctx context.Context, roll, zone string) error {
+	if roll == "" || zone == "" {
+		return fmt.Errorf("radar: activity needs a roll and a zone")
+	}
+	key := activityKey(roll)
+	pipe := s.rdb.Pipeline()
+	pipe.SAdd(ctx, key+":zones", zone)
+	pipe.Expire(ctx, key+":zones", ActivityTTL)
+	pipe.HSetNX(ctx, key, "first_seen", time.Now().Unix())
+	pipe.Expire(ctx, key, ActivityTTL)
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("radar: add activity zone: %w", err)
+	}
+	return nil
+}
+
+// ActivityCounters returns a student's counters, with zones as a set size.
+func (s *Store) ActivityCounters(ctx context.Context, roll string) (map[string]int, error) {
+	key := activityKey(roll)
+	out := make(map[string]int)
+
+	vals, err := s.rdb.HGetAll(ctx, key).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, err
+	}
+	for field, raw := range vals {
+		n, convErr := strconv.Atoi(raw)
+		if convErr != nil {
+			// A corrupt field must not hide the rest of the passport.
+			continue
+		}
+		out[field] = n
+	}
+
+	zones, err := s.rdb.SCard(ctx, key+":zones").Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, err
+	}
+	out["zones"] = int(zones)
 	return out, nil
 }

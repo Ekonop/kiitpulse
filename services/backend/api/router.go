@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/kiitpulse/backend/campus"
 	"github.com/kiitpulse/backend/chat"
 	"github.com/kiitpulse/backend/domain"
+	"github.com/kiitpulse/backend/passport"
 	"github.com/kiitpulse/backend/radar"
 	"github.com/kiitpulse/backend/stage"
 	"github.com/kiitpulse/backend/voice"
@@ -37,6 +39,8 @@ type Deps struct {
 	Voice voice.Config
 	// Stage tracks speaker grants per topic.
 	Stage *stage.Registry
+	// Passport awards badges from observed activity.
+	Passport *passport.Tracker
 }
 
 // NewRouter builds the HTTP surface.
@@ -175,6 +179,17 @@ func NewRouter(d Deps) *gin.Engine {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "could not create topic"})
 			return
 		}
+		// Credit the student who opened it, and note which zone they were in.
+		if d.Passport != nil {
+			roll := c.MustGet(CtxStudent).(domain.Student).RollNumber
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = d.Passport.RecordTopic(ctx, roll)
+				_ = d.Passport.RecordZone(ctx, roll, campus.ParseZone(body.CampusZone).Key())
+			}()
+		}
+
 		c.JSON(http.StatusCreated, created)
 	})
 
@@ -273,16 +288,116 @@ func NewRouter(d Deps) *gin.Engine {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "topic_id is required"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"topic_id": body.TopicID, "raised": body.Raised})
+		if d.Stage == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "stage unavailable"})
+			return
+		}
+		student := c.MustGet(CtxStudent).(domain.Student)
+		role := d.Stage.SetHand(body.TopicID, student.RollNumber, body.Raised)
+		c.JSON(http.StatusOK, gin.H{
+			"topic_id": body.TopicID,
+			"raised":   role == domain.StageRoleHandRaised,
+			"role":     role,
+		})
+	})
+
+	// Joining a stage is what makes someone appear on the roster and what the
+	// radar scores as a voice join. Without this the stage had no members and
+	// the 3.5x voice weight in the velocity formula was never triggered.
+	authed.POST("/voice/stage/:topicID/join", func(c *gin.Context) {
+		topicID := c.Param("topicID")
+		if d.Stage == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "stage unavailable"})
+			return
+		}
+		student := c.MustGet(CtxStudent).(domain.Student)
+		d.Stage.Join(topicID, student.RollNumber)
+
+		if d.Passport != nil {
+			go func(roll string) {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = d.Passport.RecordVoiceJoin(ctx, roll)
+			}(student.RollNumber)
+		}
+
+		// Score the join. Fire-and-forget: a radar hiccup must not stop someone
+		// entering a room.
+		if topic, err := d.Radar.Topic(c.Request.Context(), topicID); err == nil {
+			go func(zone campus.Zone) {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = d.Radar.RecordEvent(ctx, zone, topicID, radar.EventVoiceJoin)
+			}(campus.Zone(topic.Zone))
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"topic_id": topicID,
+			"role":     d.Stage.Role(topicID, student.RollNumber),
+			"members":  d.Stage.Members(topicID),
+		})
+	})
+
+	authed.POST("/voice/stage/:topicID/leave", func(c *gin.Context) {
+		topicID := c.Param("topicID")
+		student := c.MustGet(CtxStudent).(domain.Student)
+		if d.Stage != nil {
+			d.Stage.Leave(topicID, student.RollNumber)
+		}
+		c.JSON(http.StatusOK, gin.H{"topic_id": topicID, "left": true})
 	})
 
 	authed.GET("/voice/stage/:topicID", func(c *gin.Context) {
 		topicID := c.Param("topicID")
+		var members []domain.StageMember
+		if d.Stage != nil {
+			members = d.Stage.Members(topicID)
+		}
+		if members == nil {
+			members = []domain.StageMember{}
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"topic_id": topicID,
-			"members":  []string{},
-			"count":    d.Hub.RoomSize(topicID),
+			"members":  members,
+			"count":    len(members),
 		})
+	})
+
+	// ---- reactions -----------------------------------------------------
+	// Reactions feed the radar at 0.25 of a message each. They are counted, not
+	// stored per-user: an ephemeral campus pulse does not need a permanent
+	// record of who tapped fire on a 24-hour topic.
+	authed.POST("/topics/:topicID/react", func(c *gin.Context) {
+		topicID := c.Param("topicID")
+		var body struct {
+			Kind domain.ReactionKind `json:"kind"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid reaction body"})
+			return
+		}
+		if !body.Kind.Valid() {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "kind must be one of fire, agree, ask",
+				"code":  "UNKNOWN_REACTION",
+			})
+			return
+		}
+
+		topic, err := d.Radar.Topic(c.Request.Context(), topicID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "no such topic"})
+			return
+		}
+
+		if err := d.Radar.RecordEvent(c.Request.Context(), campus.Zone(topic.Zone),
+			topicID, radar.EventReaction); err != nil {
+			d.Log.Error("record reaction", "topic", topicID, "err", err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "could not record reaction"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"topic_id": topicID, "kind": body.Kind})
 	})
 
 	// ---- chat history --------------------------------------------------
@@ -314,7 +429,21 @@ func NewRouter(d Deps) *gin.Engine {
 			c.JSON(http.StatusForbidden, gin.H{"error": "you can only read your own passport"})
 			return
 		}
-		c.JSON(http.StatusOK, []any{})
+		if d.Passport == nil {
+			c.JSON(http.StatusOK, []any{})
+			return
+		}
+
+		activity, err := d.Passport.Activity(c.Request.Context(), student.RollNumber)
+		if err != nil {
+			d.Log.Error("passport: read activity", "roll", student.RollNumber, "err", err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "could not read your passport"})
+			return
+		}
+
+		badges := passport.Award(activity)
+		passport.SortByIssued(badges)
+		c.JSON(http.StatusOK, badges)
 	})
 
 	return r

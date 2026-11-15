@@ -345,6 +345,37 @@ class LiveGateway implements PulseGateway {
     return StageToken.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
   }
 
+  /// Announce that this student is on the stage.
+  ///
+  /// Without this the server never learns they joined: the roster stayed empty
+  /// and the radar never scored a voice join, so the 3.5x weight in the
+  /// velocity formula could never fire.
+  Future<void> joinStage(String topicId) async {
+    final res = await _http
+        .post(
+          _uri('/voice/stage/$topicId/join'),
+          headers: _headers,
+          body: jsonEncode({}),
+        )
+        .timeout(const Duration(seconds: 8));
+    if (res.statusCode != 200) _fail(res);
+  }
+
+  /// Leave the stage so the roster stops listing a student who has gone.
+  Future<void> leaveStage(String topicId) async {
+    try {
+      await _http
+          .post(
+            _uri('/voice/stage/$topicId/leave'),
+            headers: _headers,
+            body: jsonEncode({}),
+          )
+          .timeout(const Duration(seconds: 8));
+    } catch (_) {
+      // Best effort: leaving must never block the UI from closing.
+    }
+  }
+
   @override
   Future<void> setHandRaised({
     required String topicId,
@@ -390,7 +421,15 @@ class LiveGateway implements PulseGateway {
           .get(_uri('/voice/stage/$topicId'), headers: _headers)
           .timeout(const Duration(seconds: 8));
       if (res.statusCode != 200) return;
-      final list = (jsonDecode(res.body) as List<dynamic>)
+
+      // The server answers {topic_id, members, count}, not a bare array. Parsing
+      // it as a List threw on every poll, which is why the stage roster stayed
+      // empty no matter how many people joined.
+      final body = jsonDecode(res.body);
+      final members = body is Map<String, dynamic>
+          ? (body['members'] as List<dynamic>? ?? const [])
+          : (body as List<dynamic>);
+      final list = members
           .map((e) => _participantFromJson(e as Map<String, dynamic>))
           .toList();
       if (!ctrl.isClosed) ctrl.add(List.unmodifiable(list));
@@ -412,7 +451,7 @@ class LiveGateway implements PulseGateway {
   StageRole _roleFrom(String? raw) => switch (raw) {
         'moderator' => StageRole.moderator,
         'speaker' => StageRole.speaker,
-        'hand_raised' => StageRole.handRaised,
+        'handRaised' || 'hand_raised' => StageRole.handRaised,
         _ => StageRole.listener,
       };
 

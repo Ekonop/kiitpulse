@@ -93,6 +93,13 @@ class _HistoryFailsGateway implements PulseGateway {
   }) async =>
       throw UnimplementedError();
   @override
+  @override
+  Future<void> joinStage(String topicId) async {}
+
+  @override
+  Future<void> leaveStage(String topicId) async {}
+
+  @override
   Future<void> setHandRaised({
     required String topicId,
     required bool raised,

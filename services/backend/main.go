@@ -26,8 +26,10 @@ import (
 
 	"github.com/kiitpulse/backend/api"
 	"github.com/kiitpulse/backend/auth"
+	"github.com/kiitpulse/backend/campus"
 	"github.com/kiitpulse/backend/chat"
 	"github.com/kiitpulse/backend/domain"
+	"github.com/kiitpulse/backend/passport"
 	"github.com/kiitpulse/backend/radar"
 	"github.com/kiitpulse/backend/stage"
 	"github.com/kiitpulse/backend/voice"
@@ -77,12 +79,36 @@ func main() {
 	// History then replays out of order, which is a lie about what was said.
 	// A single writer makes the order the order the hub broadcast, and keeps
 	// the socket path free of Redis latency.
+	tracker := passport.NewTracker(store)
+
 	persistQueue := make(chan domain.EphemeralMessage, 512)
 	go func() {
 		for m := range persistQueue {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+
+			// Persisting a message and scoring it are the same event. If only
+			// storage happened here, the radar would never move - it would be a
+			// list sorted by creation time wearing a velocity badge.
 			if err := store.AppendMessage(ctx, m); err != nil {
 				log.Error("persist message", "topic", m.TopicID, "err", err)
+			}
+
+			// The zone is on the topic record, not on the message, so it has to
+			// be looked up: the radar sorted set is keyed per zone and there is
+			// no way to score a topic without knowing which one it belongs to.
+			// Credit the sender's passport with this message.
+			if tracker != nil && m.SenderRoll != "" {
+				if err := tracker.RecordMessage(ctx, m.SenderRoll); err != nil {
+					log.Error("passport: record message", "roll", m.SenderRoll, "err", err)
+				}
+			}
+
+			if topic, err := store.Topic(ctx, m.TopicID); err == nil {
+				if err := store.RecordEvent(ctx, campus.Zone(topic.Zone), m.TopicID, radar.EventMessage); err != nil {
+					log.Error("score message", "topic", m.TopicID, "err", err)
+				}
+			} else {
+				log.Warn("score message: topic missing", "topic", m.TopicID, "err", err)
 			}
 			cancel()
 		}
@@ -101,6 +127,20 @@ func main() {
 		}),
 		chat.WithMessageStore(func(m domain.EphemeralMessage) {
 			persistQueue <- m
+		}),
+		// A reaction is a velocity event: it is worth 0.25 of a message.
+		chat.WithReactionHook(func(topicID, roll string) {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				topic, err := store.Topic(ctx, topicID)
+				if err != nil {
+					return
+				}
+				if err := store.RecordEvent(ctx, campus.Zone(topic.Zone), topicID, radar.EventReaction); err != nil {
+					log.Error("score reaction", "topic", topicID, "err", err)
+				}
+			}()
 		}),
 	)
 
@@ -124,6 +164,7 @@ func main() {
 		AllowOrigin: env("KIITPULSE_ORIGIN", "*"),
 		Voice:       voiceCfg,
 		Stage:       stage.New(),
+		Passport:    tracker,
 	})
 
 	srv := &http.Server{

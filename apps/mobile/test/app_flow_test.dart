@@ -121,11 +121,50 @@ void main() {
     await tester.tap(find.text('Enter the campus radar'));
     await settle(tester);
 
+    // Earn a badge the way a student does: by sending something.
+    await tester.tap(find.textContaining('#Campus15-DSA-Viva'));
+    await settle(tester);
+    await tester.enterText(find.byType(TextField).last, 'viva moved to lab 4');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await settle(tester);
+    // The badge is only earned once the send actually lands, so prove it did
+    // before leaving the room.
+    expect(find.text('viva moved to lab 4'), findsOneWidget);
+    // Return to the radar: the topic room is a pushed route with its own back
+    // affordance, not a platform navigation bar.
+    await tester.tap(find.byIcon(Icons.arrow_back_ios_new_rounded).first);
+    await settle(tester);
+
     await tester.tap(find.text('PASSPORT'));
     await settle(tester);
 
     expect(find.text('KIIT PASSPORT'), findsOneWidget);
-    expect(find.text('KIIT FEST'), findsOneWidget);
+    // Badges are awarded from observed activity, so the demo passport shows
+    // what this session earned rather than a fabricated event credential.
+    expect(find.text('FIRST WORD'), findsOneWidget);
+    expect(
+      find.textContaining('messages sent on the campus radar'),
+      findsOneWidget,
+      reason: 'a badge must state the evidence that earned it',
+    );
+  });
+
+  testWidgets('passport never claims event attendance', (tester) async {
+    // The server has no attendance feed. A badge implying the student attended
+    // a specific event would be a credential nobody verified.
+    await tester.pumpWidget(harness());
+    await settle(tester);
+    await tester.enterText(find.byType(TextField), '241551058@kiit.ac.in');
+    await tester.tap(find.text('Enter the campus radar'));
+    await settle(tester);
+    await tester.tap(find.text('PASSPORT'));
+    await settle(tester);
+
+    for (final fake in ['KIIT FEST', 'KRITARTH', 'CYBERVAULT', 'K1000 HACKNIGHT']) {
+      expect(find.text(fake), findsNothing,
+          reason: 'passport is showing an unverified attendance badge: $fake');
+    }
   });
 
   testWidgets('passport shows a real empty state for a new student', (

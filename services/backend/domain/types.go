@@ -91,3 +91,60 @@ func NewEphemeralMessage(id, topicID, roll, branch, content string) EphemeralMes
 		TimestampUnix:   time.Now().Unix(),
 	}
 }
+
+// StageRole is a student's place on a topic's voice stage.
+//
+// The wire values match the Dart StageRole enum exactly, because the client
+// switches on these strings. A mismatch would be a silent role bug.
+type StageRole string
+
+const (
+	StageRoleListener   StageRole = "listener"
+	StageRoleHandRaised StageRole = "handRaised"
+	StageRoleSpeaker    StageRole = "speaker"
+	StageRoleModerator  StageRole = "moderator"
+)
+
+// StageMember is one person on a stage.
+type StageMember struct {
+	Roll string    `json:"roll"`
+	Role StageRole `json:"role"`
+}
+
+// ReactionKind is the emoji-independent reaction a student can add.
+//
+// Deliberately a closed set: a free-text reaction field is an abuse vector on a
+// campus app with no moderation queue, and three kinds cover what a topic room
+// actually needs.
+type ReactionKind string
+
+const (
+	ReactionFire  ReactionKind = "fire"
+	ReactionAgree ReactionKind = "agree"
+	ReactionAsk   ReactionKind = "ask"
+)
+
+// Valid reports whether a kind is one we accept.
+func (k ReactionKind) Valid() bool {
+	switch k {
+	case ReactionFire, ReactionAgree, ReactionAsk:
+		return true
+	}
+	return false
+}
+
+// Badge is one entry on a student's passport.
+//
+// EventName carries the evidence that earned it, not an event the student
+// attended: this deployment has no attendance feed. The field name matches the
+// wire contract the app already reads.
+type Badge struct {
+	ID          string `json:"id"`
+	StudentRoll string `json:"student_roll"`
+	Type        string `json:"badge_type"`
+	Label       string `json:"label"`
+	EventName   string `json:"event_name,omitempty"`
+	IssuedAt    int64  `json:"issued_at_unix"`
+	AccentArgb  uint32 `json:"accent_argb"`
+	Verified    bool   `json:"verified"`
+}

@@ -69,6 +69,16 @@ abstract interface class PulseGateway {
     required bool asSpeaker,
   });
 
+  /// Announce that this student is on a topic's stage.
+  ///
+  /// Separate from [mintStageToken] because minting happens before a socket
+  /// exists; joining is what puts the student on the roster and scores a voice
+  /// join on the radar.
+  Future<void> joinStage(String topicId);
+
+  /// Announce that this student has left a topic's stage.
+  Future<void> leaveStage(String topicId);
+
   /// Raise / lower a hand on a stage.
   Future<void> setHandRaised({
     required String topicId,

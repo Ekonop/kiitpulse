@@ -3,6 +3,8 @@ package stage
 import (
 	"sync"
 	"testing"
+
+	"github.com/kiitpulse/backend/domain"
 )
 
 func TestGrantAndCheck(t *testing.T) {
@@ -60,14 +62,54 @@ func TestSpeakersList(t *testing.T) {
 
 func TestEmptyTopicIsForgotten(t *testing.T) {
 	r := New()
-	r.GrantSpeaker("t1", "a")
-	r.RevokeSpeaker("t1", "a")
+	r.Join("t1", "a")
+	r.Leave("t1", "a")
 
 	r.mu.RLock()
 	_, exists := r.topic["t1"]
 	r.mu.RUnlock()
 	if exists {
 		t.Error("an empty topic was left in the map; a long-lived server leaks")
+	}
+}
+
+// TestRevokingSpeakerDemotesRatherThanRemoves: revoking the mic must not also
+// kick the student out of the room. They stay on the stage as a listener.
+func TestRevokingSpeakerDemotesRatherThanRemoves(t *testing.T) {
+	r := New()
+	r.Join("t1", "a")
+	r.GrantSpeaker("t1", "a")
+	r.RevokeSpeaker("t1", "a")
+
+	if r.Role("t1", "a") != domain.StageRoleListener {
+		t.Errorf("role = %q, want listener after revoke", r.Role("t1", "a"))
+	}
+	if r.Size("t1") != 1 {
+		t.Error("revoking a speaker removed them from the stage entirely")
+	}
+}
+
+// TestJoinIsIdempotent is the reconnect case: a dropped socket must not demote
+// a speaker when they come back.
+func TestJoinIsIdempotent(t *testing.T) {
+	r := New()
+	r.Join("t1", "a")
+	r.GrantSpeaker("t1", "a")
+	r.Join("t1", "a") // reconnect
+
+	if !r.IsSpeaker("t1", "a") {
+		t.Error("reconnecting revoked the microphone grant")
+	}
+}
+
+func TestSpeakerKeepsMicWhenLoweringHand(t *testing.T) {
+	r := New()
+	r.Join("t1", "a")
+	r.GrantSpeaker("t1", "a")
+	r.SetHand("t1", "a", false)
+
+	if !r.IsSpeaker("t1", "a") {
+		t.Error("lowering a hand cut a speaker's microphone")
 	}
 }
 

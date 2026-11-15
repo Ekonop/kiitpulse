@@ -130,6 +130,10 @@ class VoiceStageController extends StateNotifier<VoiceStageState> {
       final gateway = _ref.read(pulseGatewayProvider);
       final stageToken =
           await gateway.mintStageToken(topicId: topicId, asSpeaker: false);
+      // Tell the server we are on the stage. This is what puts us on the
+      // roster and scores the voice join; without it the stage looks empty to
+      // everyone else and the radar never learns anyone is talking.
+      await gateway.joinStage(topicId);
       if (!mounted) return;
 
       // An empty token means the deployment has no voice server. Say so instead
@@ -267,6 +271,10 @@ class VoiceStageController extends StateNotifier<VoiceStageState> {
     await _sub?.cancel();
     _sub = null;
     await _teardownRoom();
+    // Best effort: the roster must not keep listing someone who has gone.
+    try {
+      await _ref.read(pulseGatewayProvider).leaveStage(topicId);
+    } catch (_) {}
     if (!mounted) return;
     state = const VoiceStageState();
   }
