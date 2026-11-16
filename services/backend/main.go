@@ -10,6 +10,7 @@
 //	KIITPULSE_REDIS_PASS   optional
 //	KIITPULSE_ADDR         default :8080
 //	KIITPULSE_ORIGIN       CORS origin, default *
+//	KIITPULSE_WEB_ROOT     directory of built web assets to serve at /
 package main
 
 import (
@@ -162,6 +163,7 @@ func main() {
 		Hub:         hub,
 		Redis:       rdb,
 		AllowOrigin: env("KIITPULSE_ORIGIN", "*"),
+		WebRoot:     env("KIITPULSE_WEB_ROOT", ""),
 		Voice:       voiceCfg,
 		Stage:       stage.New(),
 		Passport:    tracker,

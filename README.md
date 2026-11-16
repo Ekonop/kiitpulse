@@ -85,6 +85,29 @@ unreadable — the eye cannot track from a title on the left to a velocity badge
 the right. `pulseFormFactorOf(context)` decides; a browser resize re-lays out
 without a reload.
 
+### The public deployment (one origin, real backend)
+
+```bash
+make serve-live   # builds the web app against the API, then serves both on :8080
+```
+
+One process serves the app and the API. That is deliberate:
+
+- No CORS preflight, because there is only one origin.
+- The WebSocket URL the browser derives is the host it loaded from, so a tunnel
+  works without rebuilding. The build cannot know in advance whether it will be
+  reached on `localhost`, a LAN address or a public URL, so
+  `resolveApiBaseUrl()` reads `window.location.origin` at runtime.
+- `?access_token=` carries the session on the socket, because a browser cannot
+  set an `Authorization` header on a WebSocket handshake.
+
+To expose it: `ngrok http 8080`. Verified through a tunnel with a real
+`wss://` handshake returning `101 Switching Protocols`, a message echoed back,
+and the radar score rising as a result.
+
+The ngrok free tier shows a one-time "Visit Site" consent page. That is ngrok's
+page, not the app's.
+
 ### The app, against a real backend
 
 ```bash

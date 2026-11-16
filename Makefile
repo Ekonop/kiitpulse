@@ -102,6 +102,20 @@ web: ## Production web build into apps/mobile/build/web
 serve-web: web ## Build the web app and serve it on :8080
 	cd $(MOBILE)/build/web && $(PYTHON) -m http.server 8080
 
+# The public deployment: one origin, app and API together, so the WebSocket URL
+# the browser derives is the same host that served the page.
+.PHONY: web-live
+web-live: ## Build the web app against the real backend, same origin
+	cd $(MOBILE) && $(FLUTTER) build web --release \
+		--dart-define=PULSE_BACKEND=live \
+		--dart-define=PULSE_API_URL=$(or $(PUBLIC_ORIGIN),http://127.0.0.1:8080)
+
+.PHONY: serve-live
+serve-live: web-live ## Serve the live web app + API on :8080
+	cd $(BACKEND) && go build -o $(HOME)/.cache/kpbin/kiitpulse-backend . && \
+	KIITPULSE_WEB_ROOT=$(MOBILE)/build/web \
+	$(HOME)/.cache/kpbin/kiitpulse-backend
+
 .PHONY: live
 live: ## Run the app against a local backend
 	cd $(MOBILE) && $(FLUTTER) run \

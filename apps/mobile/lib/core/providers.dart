@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kiit_api_client/kiit_api_client.dart';
 
 import 'auth/auth_controller.dart';
+import 'web_origin.dart';
 /// Which backend the app talks to.
 enum PulseBackend { demo, live }
 
@@ -28,7 +29,10 @@ final Provider<PulseGateway> pulseGatewayProvider = Provider<PulseGateway>((ref)
   final PulseGateway gateway;
   if (_backend == 'live') {
     gateway = LiveGateway(
-      baseUrl: _apiUrl,
+      // Web serves the app and the API from one origin, which the build cannot
+      // know in advance (localhost, LAN, tunnel). resolveApiBaseUrl reads the
+      // browser's actual origin; everywhere else it returns _apiUrl unchanged.
+      baseUrl: resolveApiBaseUrl(_apiUrl),
       // Late-bound: the gateway reads the token at call time instead of the
       // provider graph depending on auth on every rebuild.
       sessionProvider: () {

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -37,10 +39,45 @@ type Deps struct {
 	AllowOrigin string
 	// Voice is the LiveKit configuration. Zero value means voice is off.
 	Voice voice.Config
+	// WebRoot, when set, is a directory of built web assets served at /.
+	//
+	// One origin for app and API means no CORS preflight, and the WebSocket URL
+	// the browser derives is the same host it loaded from - which is what makes
+	// a single tunnel usable.
+	WebRoot string
 	// Stage tracks speaker grants per topic.
 	Stage *stage.Registry
 	// Passport awards badges from observed activity.
 	Passport *passport.Tracker
+}
+
+// serveWeb serves the built Flutter app at / and keeps unknown paths on the
+// app rather than 404ing, so a deep link still boots the client.
+func serveWeb(r *gin.Engine, root string) {
+	fs := http.Dir(root)
+
+	// c.FileFromFS goes through http.FileServer, which answers a request for "/"
+	// with a relative redirect to "./" and never serves the file. Writing the
+	// bytes directly keeps "/" on the app shell.
+	index := filepath.Join(root, "index.html")
+	r.GET("/", func(c *gin.Context) { c.File(index) })
+
+	// Flutter's loader asks for a fixed set of files under these prefixes.
+	r.StaticFS("/assets", http.Dir(root+"/assets"))
+
+	// Anything not claimed by an API route is a static file if it exists, else
+	// the app shell. The API is registered first, so this cannot shadow it.
+	r.NoRoute(func(c *gin.Context) {
+		clean := strings.TrimPrefix(path.Clean(c.Request.URL.Path), "/")
+		if clean != "" {
+			if f, err := fs.Open(clean); err == nil {
+				_ = f.Close()
+				c.FileFromFS(clean, fs)
+				return
+			}
+		}
+		c.File(index)
+	})
 }
 
 // NewRouter builds the HTTP surface.
@@ -65,6 +102,10 @@ func NewRouter(d Deps) *gin.Engine {
 			"sockets": d.Hub.ClientCount(),
 		})
 	})
+
+	if d.WebRoot != "" {
+		serveWeb(r, d.WebRoot)
+	}
 
 	// ---- auth ----------------------------------------------------------
 	r.GET("/ws/topics/:topicID", webSocketRoute(d))
